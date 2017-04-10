@@ -1,0 +1,266 @@
+use libc::*;
+use bit_field::BitField;
+use pages::*;
+use util::*;
+use std::mem;
+
+// max. # of regions
+pub const REGION_COUNT: usize = 32768; // 2^48 / 8G
+
+pub const PAGE_LG2: usize = 14; // log_2(PAGE_SZ)
+pub const PAGE_SZ: usize = 1 << PAGE_LG2; // 16k
+
+// can we just use Rust threading instead of mutexes for these?
+// static jl_mutex_t finalizers_lock;
+// static jl_mutex_t gc_cache_lock;
+
+// GC stats. This is equivalent of jl_gc_num_t in Julia
+#[repr(C)]
+pub struct GcNum {
+    allocd:         i64,
+    deferred_alloc: i64,
+    freed:          i64,
+    malloc:         u64,
+    realloc:        u64,
+    poolalloc:      u64,
+    bigalloc:       u64,
+    freecall:       u64,
+    total_time:     u64,
+    total_allocd:   u64,
+    since_sweep:    u64,
+    interval:       usize,
+    pause:          c_int,
+    full_sweep:     c_int
+}
+
+impl GcNum {
+    fn new() -> GcNum {
+        GcNum {
+            allocd:         0,
+            deferred_alloc: 0,
+            freed:          0,
+            malloc:         0,
+            realloc:        0,
+            poolalloc:      0,
+            bigalloc:       0,
+            freecall:       0,
+            total_time:     0,
+            total_allocd:   0,
+            since_sweep:    0,
+            interval:       0,
+            pause:          0,
+            full_sweep:     0,
+        }
+    }
+}
+
+// A GC region, equivalent of region_t
+#[repr(C)]
+pub struct Region {
+    pub pages: Vec<Page>,
+    pub allocmap: Vec<u32>,
+    pub meta: Vec<PageMeta>,
+    pub pg_cnt: c_uint,
+    pub lb: c_uint,
+    pub ub: c_uint
+}
+
+impl Region {
+    pub fn new() -> Region {
+        Region {
+            pages: Vec::new(),
+            allocmap: Vec::new(),
+            meta: Vec::new(),
+            pg_cnt: 0,
+            lb: 0,
+            ub: 0,
+        }
+    }
+
+    // TODO: optimize with pointer arithmetic!
+    pub fn index_of(&self, page: &Page) -> Option<usize> {
+        for (i, p) in self.pages.iter().enumerate() {
+            if p as *const Page == page as *const Page {
+                return Some(i);
+            }
+        }
+        None
+    }
+}
+
+// Pool page metadata
+pub struct PageMeta {
+    pub pool_n:     u8,   // idx of pool that owns this page
+    pub has_marked: u8,   // whether any cell is marked in this page
+    pub has_young:  u8,   // whether any live and young cells are in this page, before sweeping
+    pub nold:       u16,  // #old objects
+    pub prev_nold:  u16,  // #old object during previous sweep
+    pub nfree:      u16,  // #free objects, invalid if pool that owns this page is allocating from it
+    pub osize:      u16,  // size of each object in this page
+    pub fl_begin_offset: u16, // offset of the first free object
+    pub fl_end_offset:   u16, // offset of the last free object
+    pub thread_n: u16, // thread id of the heap that owns this page
+    pub data: Option<Vec<u8>>,
+    pub ages: Option<Vec<u8>>,
+}
+
+impl PageMeta {
+    pub fn new() -> Self {
+        PageMeta {
+            pool_n:     0,
+            has_marked: 0,
+            has_young:  0,
+            nold:       0,
+            prev_nold:  0,
+            nfree:      0,
+            osize:      0,
+            fl_begin_offset: 0,
+            fl_end_offset:   0,
+            thread_n: 0,
+            data: None,
+            ages: None,
+        }
+    }
+}
+
+pub struct Gc<'a> {
+    // gc stats
+    pub gc_num: GcNum,
+    // collect interval???
+    pub last_long_collect_interval: usize,
+    // GC regions
+    pub regions: Vec<Region>, // this has size REGION_COUNT, but couldn't be an array since Region doesn't implement copy
+    // list of marked big objects, not per thread
+    pub big_objects_marked: Vec<BigVal>,
+    // list of marked finalizers for object that need to be finalized in last mark phase
+    pub finalizer_list_marked: Vec<Finalizer<'a>>,
+    pub to_finalize: Vec<Finalizer<'a>>, // make sure that this doesn't have tagged pointers by refining the type
+    pub lazy_freed_pages: i64,
+    pub page_mgr: PageMgr,
+    pub page_size: usize,
+}
+
+// GC implementation
+
+impl<'a> Gc<'a> {
+    pub fn new(page_size: usize) -> Gc<'a> {
+        let mut regions = Vec::with_capacity(REGION_COUNT);
+        for i in 0..REGION_COUNT {
+            regions.push(Region::new());
+        }
+        Gc {
+            gc_num: GcNum::new(),
+            last_long_collect_interval: 0,
+            regions: regions,
+            big_objects_marked: Vec::new(),
+            finalizer_list_marked: Vec::new(),
+            to_finalize: Vec::new(),
+            lazy_freed_pages: 0,
+            page_mgr: PageMgr::new(),
+            page_size: page_size, // equivalent of jl_page_size, size of OS' pages
+        }
+    }
+
+    pub fn schedule_finalization(&mut self, o: Option<&'a JlValue>, f: uintptr_t) {
+        self.to_finalize.push(Finalizer::new(o, f));
+    }
+
+    // move run_finalizer to C side
+    // pub fn run_finalizer(tls: Option<JlTLS>, obj: &JlValue, ff: &Option<JlValue>)
+
+    // if `need_sync` then `list` is the `finalizers` list of another thread
+    pub fn finalize_object<'b>(&mut self, list: &mut Vec<Finalizer<'b>>, o: Option<&'b JlValue>, copied_list: &mut Vec<Finalizer<'b>>, need_sync: bool) {
+        // make sure that this is atomic by checking need_sync
+        for i in 1..list.len() {
+            let v = list[i].obj;
+            let mut shouldMove = false;
+            if (o.map(|n| n as *const JlValue as usize) == (v.as_ref().map(|n| (n as *const &JlValue as usize).clear_tag(1)))) {
+                shouldMove = true;
+                let f = list[i].fun;
+                // function is an actual function, cast the pointer
+                if (v.as_ref().map(|n| (n as *const &JlValue as usize) & 1).unwrap_or(0) != 0) {
+                    // this works because of null pointer optimization on Option<T>
+                    let f: fn(Option<&JlValue>) -> *const c_void = unsafe { mem::transmute(f) };
+                    f(o);
+                } else {
+                    copied_list.push(Finalizer::new(o, f));
+                }                
+            }
+            if (shouldMove || v.is_none()) {
+                // TODO: make sure that these updates are atomic by enforcing rules on vecs if need_sync
+                list.swap_remove(i);
+            }
+        }
+    }
+
+    // ???
+}
+
+type JlValue = c_void;
+
+pub struct Finalizer<'a> {
+    obj: Option<&'a JlValue>,
+    fun: uintptr_t,
+}
+
+impl<'a> Finalizer<'a> {
+    pub fn new(o: Option<&'a JlValue>, fun: uintptr_t) -> Self {
+        Finalizer { obj: o, fun: fun }
+    }
+}
+
+// representation of big objects
+#[repr(C)]
+pub struct BigVal {
+    next: Box<BigVal>,
+    prev: Box<BigVal>,
+    szOrAge: usize, // unpack this union via methods
+    padding: [u8; 32], // to align to 64 bits
+    headerOrBits: usize // unpack this union via methods
+}
+
+// list of malloc'd arrays
+#[repr(C)]
+pub struct MallocArray {
+    a: Box<JlArray>,
+    next: Box<MallocArray>
+}
+
+#[repr(C)]
+struct JlArray {
+    data: *mut c_void,
+    // assuming STORE_ARRAY_LEN, comment next line if not
+    length: usize,
+    flags: JlArrayFlags,
+    elsize: u16,
+    offset: u32, // only for 1-d
+    nrows: usize,
+    maxsize: usize, // this is ncols if N-dim
+}
+
+impl JlArray {
+    // imitate ncols in union in C
+    #[inline(always)]
+    pub fn ncols(&self) -> usize {
+        self.maxsize
+    }
+
+    #[inline(always)]
+    pub fn set_ncols(&mut self, ncols: usize) {
+        self.maxsize = ncols;
+    }
+}
+
+#[repr(C)]
+struct JlArrayFlags {
+    bits: u16
+}
+
+impl JlArrayFlags {
+    pub fn how(&self) -> u16 {
+        self.bits.get_bits(0..2)
+    }
+    pub fn set_how(&mut self, how: u16) {
+        self.bits.set_bits(0..2, how);
+    }
+}

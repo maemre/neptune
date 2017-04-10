@@ -1,0 +1,8 @@
+[package]
+name = "neptune"
+version = "0.1.0"
+authors = ["Mehmet Emre <maemre2@gmail.com>"]
+
+[dependencies]
+libc = "0.2.21"
+bit_field = "0.7.0"
