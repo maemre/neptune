@@ -7,7 +7,9 @@ parallelism. Before trying to rewrite/improve Julia's GC, we should understand
 some of the fundamental restrictions we have, how current GC works, and why it
 works this way. This document is trying to shed some light on that topic.
 
-* Restrictions
+* Requirements
+
+** Non-moving
 Julia has a wide FFI support to use high performance numerical libraries
 written in C/C++ and FORTRAN but GC is designed with the requirement such that
 it can work while foreign/unmanaged code is running. Moreover, Julia doesn't
@@ -18,6 +20,63 @@ set). Hence, GC cannot move object around, otherwise running foreign code could
 have dangled pointers! Any GC that we will design needs to be non-moving so all
 compacting or copying collector designs are out (although we can use other
 ideas from those GCs perhaps).
+
+** Finalizers
+Julia supports finalizers to be called at the end of the sweep phase. GC keeps
+finalizers in a list that gets shrunk by executing and cleaning finalizers for
+objects collected by GC. Current design makes sure that all finalizers on an
+object are called sequentially and finalizers on different objects are not
+interleaved. I'm not sure whether that is accidental or an actual
+requirement. Moreover, Julia can issue both a C functions and managed code as
+finalizers, it keeps track of which by tagging a pointer to the object
+finalizer attached to on a finalizer list. We prefer using a Rust enum for
+extra safety. To do so, we need to either expose some opaque interface to C. In
+the other direction, we can keep the tags as is but we need to have an opaque
+interface to extract the information.
+
+* Object life cycle
+
+Following is lifecycle of an object between GC phases. ~quicksweep~ means a
+sweep phase that doesn't touch old and marked objects. An object gets collected
+if it is not ~GC_MARKED~ or ~GC_OLD_MARKED~.
+
+#+BEGIN_SRC ditaa :file gc_object_lifetime.png
+   |  Alive
+   |
+   |
+   |<------------+
+   | (quick)sweep|
+   |             |
+   |             +------+
+   |     +------>|GC_OLD|<-------------------------+
+   |     |       +------+                          |
+   |     |        |                                |(quick)sweep ∧ age ≩ promotion
+   |     |        |          +-----------------+   |
+   |     |sweep   |mark      |GC_MARKED(remset)|   |
+   |     |        |          +-----------------+   |
+   |     |        |             ^       |          |
+   |     |        |    writeback|       |mark      |
+   |     |        v             |       |          |
+   |     |       +-----------------+    |          |
+   |     +-------|GC_OLD_MARKED    |<---+          |
+   |             +-----------------+               |
+   |                    | ^                        |
+   |                    | |quicksweep              |
+   |                    +-+                        |                     Old
+   |-----------------------------------------------+---------------------------
+   |                                               |                     Young
+   | new  +--------+ mark   +---------+            |
+   |----->|GC_CLEAN|------->|GC_MARKED|------------+
+   |      +--------+        +---------+
+   |             |^           |
+   |<------------+|           |(quick)sweep ∧ age ≤ promotion
+   | (quick)sweep +-----------+
+   |
+ Dead
+#+END_SRC
+
+#+RESULTS:
+[[file:gc_object_lifetime.png]]
 
 * Amount of parallelism
 Julia GC can run in parallel to unmanaged code with no restriction. When
@@ -76,7 +135,8 @@ locking during sweep process. In this way, our collector will be
 /somewhat-moving/. Of course, there will be a couple issues with this since the
 FFI poison marks won't be removed as FFI code may also keep pointers to these
 objects internally. Julia promises to not move the objects in such cases and we
-cannot break that promise.
+cannot break that promise. Hence, we may do this optimization only for the
+younger generation.
 ** Choosing between different strategies (really difficult)
 We can write some heuristics and some hooks to switch the GC strategy between
 parallel and concurrent to optimize for throughput or latency respectively.
