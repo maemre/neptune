@@ -1,0 +1,52 @@
+#+title: Tentative roadmap of the project
+#+author: Mehmet Emre
+
+* Link Neptune and Julia
+Modify the Makefiles to link Neptune and Julia, then test it by calling some
+simple stub in Rust side from C to see that it doesn't crash.
+
+* A simple GC
+Write a simple GC in Rust to see it work
+
+- [ ] Remove most of the code used internally in current GC 
+- [ ] Write a simple allocator with no collection, piggybacking on Rust's
+  memory allocator.
+- [ ] Write stubs for GC debug routines.
+- [ ] Write a simple mark and sweep garbage collector.
+- [ ] Write some unit tests on Rust side to check liveness.
+- [ ] Test on Julia code with GC debug routines to make sure that the
+  collection actually kicks in.
+- [ ] Test with valgrind to find memory leaks.
+
+* Better allocator
+Improve the allocator rather than relying on Rust's. *Test with testing
+procedures above after each step*.
+
+- [ ] Use ~alloc::heap~ to write a page manager.
+- [ ] Switch to page manager for memory allocation.
+- [ ] Switch to a region-based page manager.
+- [ ] Switch to ~mmap~ and memory commit/de-commit for a more efficient and
+  happier relationship with the OS. This part requires writing custom code for
+  Windows if we plan to support it.
+
+* Incremental GC
+Make GC incremental on a single thread to find some of the bugs early.
+
+- [ ] Update how write barriers work and add hooks exposed from GC.
+- [ ] Update GC to do a minor mark or collection every once in a while.
+- [ ] Update GC debug hooks.
+- [ ] Testing for soundness.
+- [ ] Testing for performance by measuring latency numbers.
+
+* Concurrent GC
+- [ ] Read concurrent GC papers.
+- [ ] Design a concurrent /or/ parallel GC.
+- [ ] TBD.
+
+* Benchmarking
+TBD.
+
+* Optimization (optional)
+If we have time, do profiling with callgrind to find which steps of GC consume
+most time to optimize for time. Also use GC statistics to optimize for latency
+or throughput.
