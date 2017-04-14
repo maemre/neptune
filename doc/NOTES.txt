@@ -26,7 +26,6 @@ gc.c:jl_gc_pool_alloc(ptls, pool_offset) / gc.c:maybe_collect(ptls) →
         + // ... Much more ... //
     
     + safepoint.c:jl_safepoint_end_gc()
-
 Questions:
 -------------
 What are ptls?
@@ -54,3 +53,12 @@ Other important structs used by the tls are:
 What is a remset (used in _jl_gc_collect(...))
    * In the jl_thread_heap, it is an arraylist_t, the 'remembered set'?
 What is a 'weak' reference?
+   * According to MSDN, a weak reference is a way to allow the garbage collector
+     to collect an object *while* the user code can still access it. It is "valid...
+     until the object is collected when no strong references exist." A 'strong'
+     reference is just when the application can reach an object.
+   * According to Wikipedia also, an object with just weak references can be
+     garbage collected/treated as unreachable. If object is collected
+     and then needed, will have to be allocated?
+   * Helps avoid resident mem/space leak problem in reference counting garbage
+     collection scheme

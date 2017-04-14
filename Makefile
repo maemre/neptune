@@ -12,7 +12,7 @@ link: neptune julia
 	cp julia/usr/bin/julia bin
 
 neptune: neptune/src/*.rs neptune/Cargo.toml
-	cd neptune && cargo build --$(BUILD_TYPE)
+	cd neptune && cargo build #--$(BUILD_TYPE)
 
 julia:
 	$(MAKE) -C julia

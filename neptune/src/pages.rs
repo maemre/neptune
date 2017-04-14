@@ -51,7 +51,7 @@ impl PageMgr {
             unsafe {
                 // an exponential decrease to find limit within a binary order of magnitude quickly
                 if libc::getrlimit(libc::RLIMIT_AS, &mut rl as *mut libc::rlimit) == 0 {
-                    while (rl.rlim_cur < (region_pg_count as u64) * (mem::size_of::<Page>() as u64) * 2) &&
+                    while ((rl.rlim_cur as u64) < (region_pg_count as u64) * (mem::size_of::<Page>() as u64) * 2) &&
                         (region_pg_count >= MIN_REGION_PG_COUNT) {
                             region_pg_count /= 2;
                     }

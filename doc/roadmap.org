@@ -10,12 +10,12 @@ Write a simple GC in Rust to see it work
 
 - [ ] Remove most of the code used internally in current GC 
 - [ ] Write a simple allocator with no collection, piggybacking on Rust's
-  memory allocator.
+      memory allocator.
 - [ ] Write stubs for GC debug routines.
 - [ ] Write a simple mark and sweep garbage collector.
 - [ ] Write some unit tests on Rust side to check liveness.
 - [ ] Test on Julia code with GC debug routines to make sure that the
-  collection actually kicks in.
+      collection actually kicks in.
 - [ ] Test with valgrind to find memory leaks.
 
 * Better allocator
@@ -26,8 +26,8 @@ procedures above after each step*.
 - [ ] Switch to page manager for memory allocation.
 - [ ] Switch to a region-based page manager.
 - [ ] Switch to ~mmap~ and memory commit/de-commit for a more efficient and
-  happier relationship with the OS. This part requires writing custom code for
-  Windows if we plan to support it.
+      happier relationship with the OS. This part requires writing custom code for
+      Windows if we plan to support it.
 
 * Incremental GC
 Make GC incremental on a single thread to find some of the bugs early.
