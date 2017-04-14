@@ -1,4 +1,11 @@
+Called in src/codegen.cpp's 'init_julia_llvm_env(Module *m):
 gc.c:jl_gc_pool_alloc(ptls, pool_offset) / gc.c:maybe_collect(ptls) →
+
+  The following called in:
+  * src/dump.c:2379
+  * base/base.jl:144 ← probably where I should start looking
+  * also by the above function jl_gc_pool_alloc().
+
   + gc.c:jl_gc_collect(full) →
     + gc.c:jl_get_ptls_states()  
     + safepoint.c:jl_safepoint_start_gc()
@@ -26,6 +33,7 @@ gc.c:jl_gc_pool_alloc(ptls, pool_offset) / gc.c:maybe_collect(ptls) →
         + // ... Much more ... //
     
     + safepoint.c:jl_safepoint_end_gc()
+
 Questions:
 -------------
 What are ptls?

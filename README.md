@@ -70,6 +70,24 @@ Run `make benchmark` to run benchmarks after having a successful build.  The
 benchmark command _does not_ trigger a new build so you need to make sure that
 you built after your changes.
 
+## Using cscope
+To use cscope, which allows easier navigation of C source, do the following:
+ 
+  1. (in Ubuntu-based derivatives) $ apt-get install cscope
+  2. $ cd /
+  3. $ find /path/to/repo/julia -name "*.c" -o "*.h" -o "*.cpp" -o "*.hpp" > /path/to/repo/cscope.files
+  4. $ cd /path/to/repo/julia
+  5. $ cscope -b -q
+  6. If you're using vim, you can tell it where to find your cscope database file with:
+     :cscope add /path/to/repo/julia/cscope.out
+     (I'm not sure about emacs, but there is most definitely a way someone has created)
+  7. You can also run cscope in the command line just with
+     $ cscope
+     using Ctrl-d to quit.
+
+Ctags is another possible alternative, although my knowledge of how to use it isn't
+as high, and I feel like it's not as effective as cscope in some respects.
+
 ## Licensing
 
 See LICENSE for licensing details.
