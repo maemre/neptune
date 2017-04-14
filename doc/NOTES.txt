@@ -70,3 +70,16 @@ What is a 'weak' reference?
      and then needed, will have to be allocated?
    * Helps avoid resident mem/space leak problem in reference counting garbage
      collection scheme
+What is generational garbage collection?
+   * According to (https://www.ibm.com/support/knowledgecenter/SSYKE2_7.0.0/com.ibm.java.win.70.doc/diag/understanding/mm_gc_generational.html),
+     you basically split the heap up into two separate areas, a
+     new area and a tenured (i.e. old) area.
+   * When you allocate an object, you place it in the new area, which is itself split into
+     two separate areas, the 'allocate' area and the 'survivor' area.
+   * When the 'new' area runs out of space, you run garbage collection, i.e. scavenging, by
+     'tracing', copying reachable objects from 'allocate' to 'survivor' area. Then the
+     survivor area, which now contains all reachable objects, becomes the new 'allocate' space,
+     so that old allocate area can be used for next survivor area.
+   * Objects that have survived a certain number of scavenges/GCs are promoted
+     to the tenured area.
+   * This specific webpage says that the tenured area is also gc'ed, concurrently.
