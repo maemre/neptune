@@ -1,0 +1,142 @@
+#+title: Notes on Julia's current GC design
+#+author: Mehmet Emre
+#+options: html-postamble:nil
+
+Julia has a peculiar GC aware of multithreading and it has a certain degree of
+parallelism. Before trying to rewrite/improve Julia's GC, we should understand
+some of the fundamental restrictions we have, how current GC works, and why it
+works this way. This document is trying to shed some light on that topic.
+
+* Requirements
+
+** Non-moving
+Julia has a wide FFI support to use high performance numerical libraries
+written in C/C++ and FORTRAN but GC is designed with the requirement such that
+it can work while foreign/unmanaged code is running. Moreover, Julia doesn't
+know which pointers unmanaged code has access to (language manual says that any
+library calling foreign code should make sure that the object used by foreign
+code is either in or pointed from pure (non-foreign) Julia code's root
+set). Hence, GC cannot move object around, otherwise running foreign code could
+have dangled pointers! Any GC that we will design needs to be non-moving so all
+compacting or copying collector designs are out (although we can use other
+ideas from those GCs perhaps).
+
+** Finalizers
+Julia supports finalizers to be called at the end of the sweep phase. GC keeps
+finalizers in a list that gets shrunk by executing and cleaning finalizers for
+objects collected by GC. Current design makes sure that all finalizers on an
+object are called sequentially and finalizers on different objects are not
+interleaved. I'm not sure whether that is accidental or an actual
+requirement. Moreover, Julia can issue both a C functions and managed code as
+finalizers, it keeps track of which by tagging a pointer to the object
+finalizer attached to on a finalizer list. We prefer using a Rust enum for
+extra safety. To do so, we need to either expose some opaque interface to C. In
+the other direction, we can keep the tags as is but we need to have an opaque
+interface to extract the information.
+
+* Object life cycle
+
+Following is lifecycle of an object between GC phases. ~quicksweep~ means a
+sweep phase that doesn't touch old and marked objects. An object gets collected
+if it is not ~GC_MARKED~ or ~GC_OLD_MARKED~.
+
+#+BEGIN_SRC ditaa :file gc_object_lifetime.png
+   |  Alive
+   |
+   |
+   |<------------+
+   | (quick)sweep|
+   |             |
+   |             +------+
+   |     +------>|GC_OLD|<-------------------------+
+   |     |       +------+                          |
+   |     |        |                                |(quick)sweep ∧ age ≩ promotion
+   |     |        |          +-----------------+   |
+   |     |sweep   |mark      |GC_MARKED(remset)|   |
+   |     |        |          +-----------------+   |
+   |     |        |             ^       |          |
+   |     |        |    writeback|       |mark      |
+   |     |        v             |       |          |
+   |     |       +-----------------+    |          |
+   |     +-------|GC_OLD_MARKED    |<---+          |
+   |             +-----------------+               |
+   |                    | ^                        |
+   |                    | |quicksweep              |
+   |                    +-+                        |                     Old
+   |-----------------------------------------------+---------------------------
+   |                                               |                     Young
+   | new  +--------+ mark   +---------+            |
+   |----->|GC_CLEAN|------->|GC_MARKED|------------+
+   |      +--------+        +---------+
+   |             |^           |
+   |<------------+|           |(quick)sweep ∧ age ≤ promotion
+   | (quick)sweep +-----------+
+   |
+ Dead
+#+END_SRC
+
+#+RESULTS:
+[[file:gc_object_lifetime.png]]
+
+* Amount of parallelism
+Julia GC can run in parallel to unmanaged code with no restriction. When
+running parallel to managed code, GC works on only thread-local data. To have
+this ability, Julia provides a GC cache in thread-local storage for each
+thread. GC guarantees this by calling ~jl_gc_wait_for_the_world()~ function.
+
+* Safety and interacting with rest of the system from Rust
+Julia provides mutexes to prevent data races in GC data structures. It also has
+certain ~volatile~ flags for each thread denoting whether it is running managed
+code, GC, or unmanaged code to help with multithreading.
+
+On the Rust side, the affinity of the type system guarantees that there aren't
+any data races /within/ safe Rust. However, Rust is unaware of Julia's
+threading mechanism. We may need to write our own wrappers in Rust to ensure
+thread safety statically. Similarly, we need to reason about threading on Julia
+side, I presume that will be easier if we reuse existing locks since Julia
+developers did that with current lock mechanisms. Alternatively, we can have a
+parallel GC by: (1) doubling number of threads, (2) having half of them on GC
+side, and (3) locking Julia threads when entering GC and locking GC threads
+when entering Julia code.
+
+** Other considerations
+Certain things cause *Undefined Behavior* in Rust. We don't need to worry about
+most but we need to worry about the following (all but first is only in unsafe
+Rust so we will know when to think about it):
+
+ + Unwinding to a different language :: We need to make sure that we don't
+      unwind (~panic!()~) to Julia. Otherwise, GC structures become
+      unstable. To make sure that nothing fatal happens because of this, we
+      need to *always return* from Rust code and have a checker on C side
+      that'll call ~jl_throw(jl_memory_exception)~ for Julia to handle memory
+      errors gracefully.
+ + Dereferencing invalid pointers :: We need to make sure that all pointers we
+      dereference from C are valid with lots of reasoning and documentation.
+ + Causing a data race :: This is really difficult to achieve for Rust-only
+      parts if we minimize unsafe portions of our code. We need to do lots of
+      testing/debugging for Rust-C interaction.
+
+Current allocators in Rust assume that the programmer /cannot/ recover from an
+OOM anyways however this may not be true for a GC, e.g. we may try to allocate
+a huge block of memory then try a smaller size it fails to make fewer calls to
+the allocator. We need to use low-level experimental allocation APIs or
+allocate just as much as we need and make more calls to the allocator.
+
+* Possible improvements
+
+** Exploiting immutability
+Julia lets programmer specify mutability of objects and does a local mutability
+inference during JIT. We can use mutability information to skip chasing
+pointers through immutable objects if their color hasn't changed.
+** Keeping track of non-movable objects
+We can keep track of non-movable objects by keeping track of which values are
+passed to FFI calls. We can then move non-poisoned values. This will require
+locking during sweep process. In this way, our collector will be
+/somewhat-moving/. Of course, there will be a couple issues with this since the
+FFI poison marks won't be removed as FFI code may also keep pointers to these
+objects internally. Julia promises to not move the objects in such cases and we
+cannot break that promise. Hence, we may do this optimization only for the
+younger generation.
+** Choosing between different strategies (really difficult)
+We can write some heuristics and some hooks to switch the GC strategy between
+parallel and concurrent to optimize for throughput or latency respectively.
