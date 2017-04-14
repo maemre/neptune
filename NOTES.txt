@@ -1,0 +1,56 @@
+gc.c:jl_gc_pool_alloc(ptls, pool_offset) / gc.c:maybe_collect(ptls) →
+  + gc.c:jl_gc_collect(full) →
+    + gc.c:jl_get_ptls_states()  
+    + safepoint.c:jl_safepoint_start_gc()
+      // Looks like it basically checks some flags if multiple
+      // threads are running,  then sets some flags
+      + safepoint.c:jl_safepoint_enable(idx)
+        + mprotect(pageaddr, jl_page_size, PROT_NONE)
+    + gc.c:jl_gc_wait_for_the_world()
+      // At this point it is waiting for threads to reach the safepoint we set above,
+     // IF multithreading is turned on
+    + if(_some_condition_)
+      | _jl_gc_collect(ptls, full) // The meat of the algorithm
+      | jl_gc_mark_ptrfree(ptls)
+      | _jl_gc_collect(ptls, 0)
+        + foreach tls_state:
+          | jl_gc_premark
+          | jl_gc_mark_remset(ptls, ptls2)
+          | jl_gc_mark_thread_local(ptls, ptls2)
+        +  mark_roots(ptls)
+        +  foreach tls_state:
+          | sweep_finalizer_list(...)
+          | gc_mark_object_list(...)
+        + gc_mark_object_list(...)
+        +  sweep_weak_refs()
+        + // ... Much more ... //
+    
+    + safepoint.c:jl_safepoint_end_gc()
+
+Questions:
+-------------
+What are ptls?
+   - Defined in julia_threads.h, it a typedef struct 
+     '_jl_tls_states_t' representing the **state of threads**
+     (TLS = "thread local state")
+Other important structs used by the tls are:
+   * _jl_gcframe_t
+     - In julia.h, keeps track of the roots/number of roots
+   * _jl_value_t
+     - In julia.h, jl_value_t is just a synonym for it,
+       and this just a base type from which other things are
+       subtype. For example, the "jl_fptr_t", "jl_fptr_sparam_t",
+       "jl_fptr_linfo_t" are all 'subtypes' of this base types
+   * _jl_task_t
+     - In julia.h, I'm not yet sure how this fits in
+   * jl_jmp_buf
+     - In julia.h, to be cross platform, just defined to be the OS-
+       specific jmp_buf struct ('jmp_buf' in Unix)
+     - See man (3) longjmp for where it is used (pretty much opaque, don't need to
+       know much about it)
+   * jl_thread_heap
+     - In julia_threads.c, tracks arrays, objects,
+       'weak reference'?
+What is a remset (used in _jl_gc_collect(...))
+   * In the jl_thread_heap, it is an arraylist_t, the 'remembered set'?
+What is a 'weak' reference?
