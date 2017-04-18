@@ -1,5 +1,9 @@
 # -*- mode: makefile-gmake -*-
 
+# neptune-related things
+NEPTUNEHOME := $(abspath $(JULIAHOME)/../neptune)
+NEPTUNEDEPS := -lutil -ldl -lrt -lpthread -lgcc_s -lc -lm -lrt -lutil
+
 ## Note:
 ##   It is generally preferable to change these options, for
 ##   your local machine, in a file named `Make.user` in the toplevel
