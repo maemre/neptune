@@ -6,3 +6,7 @@ authors = ["Mehmet Emre <maemre2@gmail.com>"]
 [dependencies]
 libc = "0.2.21"
 bit_field = "0.7.0"
+
+[lib]
+name = "neptune"
+crate-type = ["staticlib"] # produce a static library that works with C

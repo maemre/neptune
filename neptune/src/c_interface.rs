@@ -22,7 +22,12 @@ extern {
     pub fn jl_gc_wait_for_the_world(); // wait for the world to stop
 }
 
-pub extern fn gc_init<'a>(page_size: usize) -> Box<Gc<'a>> {
+#[no_mangle]
+pub extern fn link_test(n: u32) -> u32 {
+    n * (n - 1) / 2
+}
+
+pub fn gc_init<'a>(page_size: usize) -> Box<Gc<'a>> {
     Box::new(Gc::new(page_size))
 }
 
