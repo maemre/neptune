@@ -55,7 +55,7 @@ if it is not ~GC_MARKED~ or ~GC_OLD_MARKED~.
    |     |sweep   |mark      |GC_MARKED(remset)|   |
    |     |        |          +-----------------+   |
    |     |        |             ^       |          |
-   |     |        |    writeback|       |mark      |
+   |     |        | writebarrier|       |mark      |
    |     |        v             |       |          |
    |     |       +-----------------+    |          |
    |     +-------|GC_OLD_MARKED    |<---+          |
