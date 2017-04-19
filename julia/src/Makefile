@@ -262,7 +262,7 @@ else
   SONAME_DEBUG :=
 endif
 
-$(build_shlibdir)/libjulia-debug.$(JL_MAJOR_MINOR_SHLIB_EXT): $(SRCDIR)/julia.expmap $(DOBJS) $(BUILDDIR)/flisp/libflisp-debug.a $(BUILDDIR)/support/libsupport-debug.a $(LIBUV)
+$(build_shlibdir)/libjulia-debug.$(JL_MAJOR_MINOR_SHLIB_EXT): $(SRCDIR)/julia.expmap $(DOBJS) $(BUILDDIR)/flisp/libflisp-debug.a $(BUILDDIR)/support/libsupport-debug.a $(LIBUV) $(NEPTUNEHOME)/target/debug/libneptune.a
 	@$(call PRINT_LINK, $(CXXLD) $(CXXFLAGS) $(CXXLDFLAGS) $(DEBUGFLAGS) $(DOBJS) $(RPATH_LIB) -o $@ $(LDFLAGS) $(JLIBLDFLAGS) $(NEPTUNEHOME)/target/debug/libneptune.a $(DEBUG_LIBS) $(SONAME_DEBUG))
 	$(INSTALL_NAME_CMD)libjulia-debug.$(SHLIB_EXT) $@
 ifneq ($(OS), WINNT)

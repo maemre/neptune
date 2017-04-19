@@ -6,8 +6,15 @@
 use gc::*;
 use libc::c_int;
 use libc::c_void;
+use libc::c_uint;
 use libc::uintptr_t;
 use libc;
+use pages::*;
+use core::slice;
+use std::mem;
+use core::ops::Deref;
+use core::ops::DerefMut;
+use core;
 
 pub type JlJmpBuf = libc::c_void; // we cannot use long jumps in Rust anyways
 
@@ -128,4 +135,98 @@ pub type sig_atomic_t = c_int;
 pub enum GcState {
     Waiting = 1, // thread is waiting for GC
     Safe = 2, // thread is running unmanaged code that can be executed simultaneously with GC
+}
+
+// expose page manager
+static mut PAGE_MGR: Option<PageMgr> = None;
+
+// julia's GC's regions are slightly different, using naked pointers etc.
+#[repr(C)]
+pub struct JlRegion<'a> {
+    pub pages: * mut Page,
+    pub allocmap: * mut u32,
+    pub meta: * mut PageMeta<'a>,
+    pub pg_cnt: c_uint,
+    pub lb: c_uint,
+    pub ub: c_uint
+}
+
+impl<'a> JlRegion<'a> {
+    pub fn to_region(&mut self) -> Region<'a> {
+        let pages: &mut [Page] = if self.pages as * const u8 == core::ptr::null() {
+            assert!(self.pg_cnt == 0, "page array cannot be null if region is not empty!");
+            &mut []
+        } else {
+            unsafe { slice::from_raw_parts_mut(self.pages, self.pg_cnt as usize) }
+        };
+        let allocmap: &mut [u32] = if self.allocmap as * const u8 == core::ptr::null() {
+            assert!(self.pg_cnt == 0, "alloc map cannot be null if region is not empty!");
+            &mut []
+        } else {
+            unsafe { slice::from_raw_parts_mut(self.allocmap, self.pg_cnt as usize / 32) }
+        };
+        let meta: &mut [PageMeta] = if self.meta as * const PageMeta == core::ptr::null() {
+            assert!(self.pg_cnt == 0, "pagemeta array cannot be null if region is not empty!");
+            &mut []
+        } else {
+            unsafe { slice::from_raw_parts_mut(self.meta, self.pg_cnt as usize) }
+        };
+        Region {
+            pages: pages,
+            allocmap: allocmap,
+            meta: meta,
+            pg_cnt: self.pg_cnt,
+            lb: self.lb,
+            ub: self.ub,
+        }
+    }
+    // update self using information from region
+    pub fn update(&mut self, region: Region<'a>) {
+        self.pages = region.pages.as_mut_ptr();
+        self.allocmap = region.allocmap.as_mut_ptr();
+        self.meta = region.meta.as_mut_ptr();
+        self.pg_cnt = region.pg_cnt;
+        self.lb = region.lb;
+        self.ub = region.ub;
+    }
+}
+
+pub struct JlRegionArray<'a> {
+    regions: * mut JlRegion<'a>
+}
+
+impl<'a> JlRegionArray<'a> {
+    pub fn new(regions: * mut JlRegion<'a>) -> Self {
+        JlRegionArray { regions: regions }
+    }
+}
+
+impl<'a> Deref for JlRegionArray<'a> {
+    type Target = [JlRegion<'a>];
+
+    fn deref(&self) -> &[JlRegion<'a>] {
+        unsafe { slice::from_raw_parts(self.regions, REGION_COUNT) }
+    }
+}
+
+impl<'a> DerefMut for JlRegionArray<'a> {
+    fn deref_mut(&mut self) -> &mut [JlRegion<'a>] {
+        unsafe { slice::from_raw_parts_mut(self.regions, REGION_COUNT) }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern fn neptune_init_page_mgr() {
+    PAGE_MGR = Some(PageMgr::new());
+}
+
+#[no_mangle]
+pub unsafe extern fn neptune_alloc_page<'a>(regions: * mut JlRegion<'a>) -> * mut u8 {
+    // if PAGE_MGR is uninitialized, we're better off crashing anyways
+    PAGE_MGR.as_mut().unwrap().alloc_page(&mut JlRegionArray::new(regions)).data.as_mut_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern fn neptune_free_page<'a>(regions: * mut JlRegion<'a>, page_size: usize, data: * const u8) {
+    PAGE_MGR.as_mut().unwrap().free_page(&mut JlRegionArray::new(regions), page_size, data);
 }

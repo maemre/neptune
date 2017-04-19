@@ -1,6 +1,7 @@
 // This file is a part of Julia. License is MIT: http://julialang.org/license
 
 #include "gc.h"
+#include "neptune.h"
 #ifndef _OS_WINDOWS_
 #  include <sys/resource.h>
 #endif
@@ -24,17 +25,7 @@ static size_t current_pg_count = 0;
 
 void jl_gc_init_page(void)
 {
-#ifndef _OS_WINDOWS_
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_AS, &rl) == 0) {
-        // This is not 100% precise and not the most efficient implementation
-        // but should be close enough and fast enough for the normal case.
-        while (rl.rlim_cur < region_pg_cnt * sizeof(jl_gc_page_t) * 2 &&
-               region_pg_cnt >= MIN_REGION_PG_COUNT) {
-            region_pg_cnt /= 2;
-        }
-    }
-#endif
+  neptune_init_page_mgr();
 }
 
 #ifndef MAP_NORESERVE // not defined in POSIX, FreeBSD, etc.
@@ -113,97 +104,12 @@ static void jl_gc_alloc_region(region_t *region)
 
 NOINLINE void *jl_gc_alloc_page(void)
 {
-    int i;
-    region_t *region;
-    int region_i = 0;
-    JL_LOCK_NOGC(&pagealloc_lock);
-    while (region_i < REGION_COUNT) {
-        region = &regions[region_i];
-        if (region->pages == NULL)
-            jl_gc_alloc_region(region);
-        for (i = region->lb; i < region->pg_cnt / 32; i++) {
-            if (~region->allocmap[i])
-                break;
-        }
-        if (i == region->pg_cnt / 32) {
-            // region full
-            region_i++;
-            continue;
-        }
-        break;
-    }
-    if (__unlikely(region_i >= REGION_COUNT)) {
-        JL_UNLOCK_NOGC(&pagealloc_lock);
-        jl_throw(jl_memory_exception);
-    }
-    if (region->lb < i)
-        region->lb = i;
-    if (region->ub < i)
-        region->ub = i;
-
-#if defined(_COMPILER_MINGW_)
-    int j = __builtin_ffs(~region->allocmap[i]) - 1;
-#elif defined(_COMPILER_MICROSOFT_)
-    unsigned long j;
-    _BitScanForward(&j, ~region->allocmap[i]);
-#else
-    int j = ffs(~region->allocmap[i]) - 1;
-#endif
-
-    region->allocmap[i] |= (uint32_t)(1 << j);
-    void *ptr = region->pages[i * 32 + j].data;
-#ifdef _OS_WINDOWS_
-    VirtualAlloc(ptr, GC_PAGE_SZ, MEM_COMMIT, PAGE_READWRITE);
-#endif
-    current_pg_count++;
-    gc_final_count_page(current_pg_count);
-    JL_UNLOCK_NOGC(&pagealloc_lock);
-    return ptr;
+  return neptune_alloc_page(regions);
 }
 
 void jl_gc_free_page(void *p)
 {
-    int pg_idx = -1;
-    int i;
-    region_t *region = regions;
-    for (i = 0; i < REGION_COUNT && regions[i].pages != NULL; i++) {
-        region = &regions[i];
-        pg_idx = page_index(region, p);
-        if (pg_idx >= 0 && pg_idx < region->pg_cnt) {
-            break;
-        }
-    }
-    assert(i < REGION_COUNT && region->pages != NULL);
-    uint32_t msk = (uint32_t)(1 << (pg_idx % 32));
-    assert(region->allocmap[pg_idx/32] & msk);
-    region->allocmap[pg_idx/32] ^= msk;
-    free(region->meta[pg_idx].ages);
-    // tell the OS we don't need these pages right now
-    size_t decommit_size = GC_PAGE_SZ;
-    if (GC_PAGE_SZ < jl_page_size) {
-        // ensure so we don't release more memory than intended
-        size_t n_pages = (GC_PAGE_SZ + jl_page_size - 1) / GC_PAGE_SZ;
-        decommit_size = jl_page_size;
-        p = (void*)((uintptr_t)region->pages[pg_idx].data & ~(jl_page_size - 1)); // round down to the nearest page
-        pg_idx = page_index(region, p);
-        if (pg_idx + n_pages > region->pg_cnt)
-            goto no_decommit;
-        for (; n_pages--; pg_idx++) {
-            msk = (uint32_t)(1 << ((pg_idx % 32)));
-            if (region->allocmap[pg_idx / 32] & msk) {
-                goto no_decommit;
-            }
-        }
-    }
-#ifdef _OS_WINDOWS_
-    VirtualFree(p, decommit_size, MEM_DECOMMIT);
-#else
-    madvise(p, decommit_size, MADV_DONTNEED);
-#endif
-no_decommit:
-    if (region->lb > pg_idx / 32)
-        region->lb = pg_idx / 32;
-    current_pg_count--;
+  neptune_free_page(regions, jl_page_size, p);
 }
 
 #ifdef __cplusplus

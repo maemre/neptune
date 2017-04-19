@@ -7,6 +7,7 @@ use libc;
 use std::mem;
 use util::*;
 use bit_field::BitField;
+use core;
 
 // max. page count per region.
 #[cfg(archbits="32")]
@@ -21,7 +22,7 @@ const MIN_REGION_PG_COUNT: usize = 64; // 1 MB
 #[repr(C)]
 #[derive(Copy)]
 pub struct Page {
-    data: [u8; PAGE_SZ]
+    pub data: [u8; PAGE_SZ]
 }
 
 impl Clone for Page {
@@ -47,7 +48,7 @@ impl PageMgr {
                 rlim_cur: 0,
                 rlim_max: 0
             };
-            
+
             unsafe {
                 // an exponential decrease to find limit within a binary order of magnitude quickly
                 if libc::getrlimit(libc::RLIMIT_AS, &mut rl as *mut libc::rlimit) == 0 {
@@ -64,20 +65,54 @@ impl PageMgr {
         }
     }
 
-    pub fn alloc_region_mem(&self, pg_cnt: usize) -> Option<Region> {
-        // let pages_sz = mem::size_of::<Page>() * pg_cnt;
-        // let freemap_sz = mem::size_of::<u32>() * pg_cnt / 32;
-        // let meta_sz = mem::size_of::<u32>() * pg_cnt;
-
-        // TODO: change following with a custom allocator
-        // allocate using Rust's allocator:
-        let mut region = Region::new();
-        region.pages = vec![Page { data: [0; PAGE_SZ] }; pg_cnt]; // TODO: this might fail! write a custom allocator for this
-        region.allocmap = vec![0; pg_cnt / 32];
-        region.meta = Vec::with_capacity(pg_cnt);
-        for i in 0..pg_cnt {
-            region.meta[i] = PageMeta::new();
+    unsafe fn alloc_unmanaged_array<'a, T>(len: usize) -> &'a mut [T] {
+        match len.checked_mul(mem::size_of::<T>()) {
+            Some(size) => {
+                // allocate the memory
+                let m = libc::mmap(core::ptr::null_mut(),
+                                   size,
+                                   libc::PROT_READ | libc::PROT_WRITE,
+                                   libc::MAP_NORESERVE | libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                                   -1,
+                                   0);
+                if m == core::ptr::null_mut() {
+                    panic!("Memory error: mmap failed!");
+                }
+                // memory alchemy! make it a Rust slice
+                ::std::slice::from_raw_parts_mut(mem::transmute(m), size)
+            }
+            None => {
+                panic!("Memory error: requested array's size is greater than 2^64!");
+            }
         }
+    }
+
+    unsafe fn alloc_unmanaged_zeroed_array<'a, T>(len: usize) -> &'a mut [T] {
+        let s = PageMgr::alloc_unmanaged_array(len);
+        // zero the memory
+        libc::memset(mem::transmute(s.as_mut_ptr()), 0, len * mem::size_of::<T>());
+        s
+    }
+
+    pub fn alloc_region_mem<'a>(&self, pg_cnt: usize) -> Option<Region<'a>> {
+        let pages_sz = mem::size_of::<Page>() * pg_cnt;
+        let freemap_sz = mem::size_of::<u32>() * pg_cnt / 32;
+        let meta_sz =  pg_cnt;
+
+        let mut region = Region::new();
+        println!("page count: {}", pg_cnt);
+        // TODO: handle failure for this gracefully
+        region.pages = unsafe {
+            PageMgr::alloc_unmanaged_array(pg_cnt)
+        };
+        region.allocmap = unsafe {
+            PageMgr::alloc_unmanaged_zeroed_array(pg_cnt / 32)
+        };
+        // mmap hack time
+        region.meta = unsafe {
+            PageMgr::alloc_unmanaged_zeroed_array(pg_cnt)
+        };
+        region.pg_cnt = pg_cnt as u32;
         // TODO: commit meta and allocmap
         Some(region)
     }
@@ -108,25 +143,35 @@ impl PageMgr {
     }
 
     #[inline(never)]
-    pub fn alloc_page<'a>(&mut self, gc: &'a mut Gc) -> &'a Page {
+    pub fn alloc_page<'a>(&mut self, regions: &'a mut [JlRegion]) -> &'a mut Page {
+        println!("allocating page...");
         let mut i: Option<u32> = None;
         let mut region_i = 0;
-        'outer: for ref mut region in gc.regions.iter_mut() {
+        println!("regions.len = {}", regions.len());
+        'outer: for region_ii in 0..regions.len() {
+            let mut region = regions[region_ii].to_region();
+            println!("#pages in region {}: {}", region_i, region.pages.len());
             if region.pages.len() == 0 {
                 // found an empty region, allocate it
-                self.alloc_region(region);
+                self.alloc_region(&mut region);
             }
             for j in region.lb..(region.pg_cnt / 32) {
+                println!("j: {}", j);
                 if (!region.allocmap[j as usize]) != 0 {
                     // there are free pages in the region
                     i = Some(j);
+                    regions[region_i].update(region);
                     break 'outer;
+                } else {
+                    println!("allocmap: {}", region.allocmap[j as usize]);
                 }
             }
+            println!("region {} was full, lb: {}, pg_cnt: {}", region_i, region.lb, region.pg_cnt);
+            regions[region_i].update(region);
             region_i += 1;
         }
         if let Some(i) = i {
-            let region = &mut gc.regions[region_i];
+            let region = &mut regions[region_i];
             // update bounds
             if region.lb < i {
                 region.lb = i;
@@ -135,44 +180,48 @@ impl PageMgr {
                 region.ub = i;
             }
             // find first empty page
-            let j = ((! region.allocmap[i as usize]).ffs() - 1) as u32;
-            region.allocmap[i as usize] |= 1 << j;
+            let j = ((! region.to_region().allocmap[i as usize]).ffs() - 1) as u32;
+            region.to_region().allocmap[i as usize] |= 1 << j;
             // TODO: commit page (&region.pages[i * 32 + j])
             self.current_pg_count += 1;
             // notify Julia's GC debugger
             unsafe {
                 gc_final_count_page(self.current_pg_count);
             }
-            &region.pages[(i * 32 + j) as usize]
+            &mut region.to_region().pages[(i * 32 + j) as usize]
         } else {
             // No regions with free memory are available and all region slots are allocated
             panic!("GC: out of memory: no regions left!"); // TODO: change with jl_throw
         }
     }
 
-    pub fn free_page(&mut self, gc: &mut Gc, p: Page) {
+    // free page with given pointer
+    pub fn free_page(&mut self, regions: &mut [JlRegion], page_size: usize, p: * const u8) {
         let mut pg_idx = None;
         let mut reg_idx = None;
-        for (i, region) in gc.regions.iter_mut().enumerate() {
+        for (i, jl_region) in regions.iter_mut().enumerate() {
+            let region = jl_region.to_region();
             if region.pages.len() == 0 {
                 continue;
             }
 
-            if let Some(pi) = region.index_of(&p) {
+            if let Some(pi) = region.index_of_raw(p) {
                 pg_idx = Some(pi);
                 reg_idx = Some(i);
             }
         }
-        
+
         let mut pg_idx = pg_idx.unwrap();
         let i = reg_idx.unwrap();
         let bit_idx = (pg_idx % 32) as u8;
-        assert!(gc.regions[i].allocmap[pg_idx / 32].get_bit(bit_idx), "GC: Memory corruption: allocation map and data mismatch!");
+        let mut region = regions[i].to_region();
 
-        gc.regions[i].allocmap[pg_idx / 32].set_bit(bit_idx, false);
+        assert!(region.allocmap[pg_idx / 32].get_bit(bit_idx), "GC: Memory corruption: allocation map and data mismatch!");
+
+        region.allocmap[pg_idx / 32].set_bit(bit_idx, false);
 
         // free age data
-        gc.regions[i].meta[pg_idx].ages = None;
+        region.meta[pg_idx].ages = None;
 
         // decommit code
 
@@ -180,21 +229,21 @@ impl PageMgr {
         let mut decommit_size = PAGE_SZ;
         let mut page_ptr: Option<*const libc::c_void> = None;
         let mut should_decommit = true;
-        if PAGE_SZ < gc.page_size {
-            let n_pages = (PAGE_SZ + gc.page_size - 1) / PAGE_SZ; // size of OS pages in terms of our pages
-            decommit_size = gc.page_size;
+        if PAGE_SZ < page_size {
+            let n_pages = (PAGE_SZ + page_size - 1) / PAGE_SZ; // size of OS pages in terms of our pages
+            decommit_size = page_size;
 
             // hacky pointer magic for figuring out OS page alignment
             let page_ptr = unsafe {
-                Some(((&gc.regions[i].pages[pg_idx].data as *const u8 as usize) & !(gc.page_size - 1)) as *const libc::c_void);
+                Some(((&region.pages[pg_idx].data as *const u8 as usize) & !(page_size - 1)) as *const libc::c_void);
             };
 
-            pg_idx = gc.regions[i].index_of(&p).unwrap();
-            if pg_idx + n_pages > gc.regions[i].pg_cnt as usize {
+            pg_idx = region.index_of_raw(p).unwrap();
+            if pg_idx + n_pages > region.pg_cnt as usize {
                 should_decommit = false;
             } else {
                 for i in 0..n_pages {
-                    if gc.regions[i].allocmap[pg_idx / 32].get_bit(bit_idx) {
+                    if region.allocmap[pg_idx / 32].get_bit(bit_idx) {
                         should_decommit = false;
                         break;
                     }
@@ -206,11 +255,12 @@ impl PageMgr {
             // TODO: actually decommit, we need to use our own allocator for this
         }
 
-        if gc.regions[i].lb as usize > pg_idx / 32 {
-            gc.regions[i].lb = (pg_idx / 32) as u32;
+        if region.lb as usize > pg_idx / 32 {
+            region.lb = (pg_idx / 32) as u32;
         }
+
+        regions[i].update(region); // write back to the region array
 
         self.current_pg_count -= 1;
     }
 }
-

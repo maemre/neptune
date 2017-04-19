@@ -56,21 +56,21 @@ impl GcNum {
 
 // A GC region, equivalent of region_t
 #[repr(C)]
-pub struct Region {
-    pub pages: Vec<Page>,
-    pub allocmap: Vec<u32>,
-    pub meta: Vec<PageMeta>,
+pub struct Region<'a> {
+    pub pages: &'a mut [Page],
+    pub allocmap: &'a mut [u32],
+    pub meta: &'a mut [PageMeta<'a>],
     pub pg_cnt: c_uint,
     pub lb: c_uint,
     pub ub: c_uint
 }
 
-impl Region {
-    pub fn new() -> Region {
+impl<'a> Region<'a> {
+    pub fn new() -> Region<'a> {
         Region {
-            pages: Vec::new(),
-            allocmap: Vec::new(),
-            meta: Vec::new(),
+            pages: &mut [],
+            allocmap: &mut [],
+            meta: &mut [],
             pg_cnt: 0,
             lb: 0,
             ub: 0,
@@ -86,10 +86,21 @@ impl Region {
         }
         None
     }
+
+    // Find page with given data pointer
+    pub fn index_of_raw(&self, data: * const u8) -> Option<usize> {
+        for (i, p) in self.pages.iter().enumerate() {
+            if p.data.as_ptr() == data {
+                return Some(i);
+            }
+        }
+        None
+    }
 }
 
 // Pool page metadata
-pub struct PageMeta {
+#[repr(C)]
+pub struct PageMeta<'a> {
     pub pool_n:     u8,   // idx of pool that owns this page
     pub has_marked: u8,   // whether any cell is marked in this page
     pub has_young:  u8,   // whether any live and young cells are in this page, before sweeping
@@ -100,11 +111,11 @@ pub struct PageMeta {
     pub fl_begin_offset: u16, // offset of the first free object
     pub fl_end_offset:   u16, // offset of the last free object
     pub thread_n: u16, // thread id of the heap that owns this page
-    pub data: Option<Vec<u8>>,
-    pub ages: Option<Vec<u8>>,
+    pub data: Option<&'a mut [u8]>,
+    pub ages: Option<&'a mut [u8]>,
 }
 
-impl PageMeta {
+impl<'a> PageMeta<'a> {
     pub fn new() -> Self {
         PageMeta {
             pool_n:     0,
@@ -129,7 +140,7 @@ pub struct Gc<'a> {
     // collect interval???
     pub last_long_collect_interval: usize,
     // GC regions
-    pub regions: Vec<Region>, // this has size REGION_COUNT, but couldn't be an array since Region doesn't implement copy
+    pub regions: Vec<Region<'a>>, // this has size REGION_COUNT, but couldn't be an array since Region doesn't implement copy
     // list of marked big objects, not per thread
     pub big_objects_marked: Vec<BigVal>,
     // list of marked finalizers for object that need to be finalized in last mark phase
@@ -174,11 +185,11 @@ impl<'a> Gc<'a> {
         for i in 1..list.len() {
             let v = list[i].obj;
             let mut shouldMove = false;
-            if (o.map(|n| n as *const JlValue as usize) == (v.as_ref().map(|n| (n as *const &JlValue as usize).clear_tag(1)))) {
+            if o.map(|n| n as *const JlValue as usize) == (v.as_ref().map(|n| (n as *const &JlValue as usize).clear_tag(1))) {
                 shouldMove = true;
                 let f = list[i].fun;
                 // function is an actual function, cast the pointer
-                if (v.as_ref().map(|n| (n as *const &JlValue as usize) & 1).unwrap_or(0) != 0) {
+                if v.as_ref().map(|n| (n as *const &JlValue as usize) & 1).unwrap_or(0) != 0 {
                     // this works because of null pointer optimization on Option<T>
                     let f: fn(Option<&JlValue>) -> *const c_void = unsafe { mem::transmute(f) };
                     f(o);
@@ -186,7 +197,7 @@ impl<'a> Gc<'a> {
                     copied_list.push(Finalizer::new(o, f));
                 }                
             }
-            if (shouldMove || v.is_none()) {
+            if shouldMove || v.is_none() {
                 // TODO: make sure that these updates are atomic by enforcing rules on vecs if need_sync
                 list.swap_remove(i);
             }
