@@ -143,31 +143,25 @@ impl PageMgr {
     }
 
     #[inline(never)]
-    pub fn alloc_page<'a>(&mut self, regions: &'a mut [JlRegion]) -> &'a mut Page {
-        println!("allocating page...");
+    pub fn alloc_page<'a>(&mut self, regions: &'a mut [Region]) -> &'a mut Page {
+        // println!("allocating page...");
         let mut i: Option<u32> = None;
         let mut region_i = 0;
-        println!("regions.len = {}", regions.len());
-        'outer: for region_ii in 0..regions.len() {
-            let mut region = regions[region_ii].to_region();
-            println!("#pages in region {}: {}", region_i, region.pages.len());
+        // println!("regions.len = {}", regions.len());
+        'outer: for region in regions.iter_mut() {
+            // println!("#pages in region {}: {}", region_i, region.pages.len());
             if region.pages.len() == 0 {
                 // found an empty region, allocate it
-                self.alloc_region(&mut region);
+                self.alloc_region(region);
             }
             for j in region.lb..(region.pg_cnt / 32) {
-                println!("j: {}", j);
+                // println!("j: {}", j);
                 if (!region.allocmap[j as usize]) != 0 {
                     // there are free pages in the region
                     i = Some(j);
-                    regions[region_i].update(region);
                     break 'outer;
-                } else {
-                    println!("allocmap: {}", region.allocmap[j as usize]);
                 }
             }
-            println!("region {} was full, lb: {}, pg_cnt: {}", region_i, region.lb, region.pg_cnt);
-            regions[region_i].update(region);
             region_i += 1;
         }
         if let Some(i) = i {
@@ -180,15 +174,15 @@ impl PageMgr {
                 region.ub = i;
             }
             // find first empty page
-            let j = ((! region.to_region().allocmap[i as usize]).ffs() - 1) as u32;
-            region.to_region().allocmap[i as usize] |= 1 << j;
+            let j = ((! region.allocmap[i as usize]).ffs() - 1) as u32;
+            region.allocmap[i as usize] |= 1 << j;
             // TODO: commit page (&region.pages[i * 32 + j])
             self.current_pg_count += 1;
             // notify Julia's GC debugger
             unsafe {
                 gc_final_count_page(self.current_pg_count);
             }
-            &mut region.to_region().pages[(i * 32 + j) as usize]
+            &mut region.pages[(i * 32 + j) as usize]
         } else {
             // No regions with free memory are available and all region slots are allocated
             panic!("GC: out of memory: no regions left!"); // TODO: change with jl_throw
@@ -196,11 +190,10 @@ impl PageMgr {
     }
 
     // free page with given pointer
-    pub fn free_page(&mut self, regions: &mut [JlRegion], page_size: usize, p: * const u8) {
+    pub fn free_page(&mut self, regions: &mut [Region], page_size: usize, p: * const u8) {
         let mut pg_idx = None;
         let mut reg_idx = None;
-        for (i, jl_region) in regions.iter_mut().enumerate() {
-            let region = jl_region.to_region();
+        for (i, region) in regions.iter_mut().enumerate() {
             if region.pages.len() == 0 {
                 continue;
             }
@@ -214,7 +207,7 @@ impl PageMgr {
         let mut pg_idx = pg_idx.unwrap();
         let i = reg_idx.unwrap();
         let bit_idx = (pg_idx % 32) as u8;
-        let mut region = regions[i].to_region();
+        let region = &mut regions[i];
 
         assert!(region.allocmap[pg_idx / 32].get_bit(bit_idx), "GC: Memory corruption: allocation map and data mismatch!");
 
@@ -258,8 +251,6 @@ impl PageMgr {
         if region.lb as usize > pg_idx / 32 {
             region.lb = (pg_idx / 32) as u32;
         }
-
-        regions[i].update(region); // write back to the region array
 
         self.current_pg_count -= 1;
     }

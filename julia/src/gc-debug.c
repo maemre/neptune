@@ -1,6 +1,7 @@
 // This file is a part of Julia. License is MIT: http://julialang.org/license
 
 #include "gc.h"
+#include "neptune.h"
 #include <inttypes.h>
 #include <stdio.h>
 
@@ -32,9 +33,9 @@ JL_DLLEXPORT jl_taggedvalue_t *jl_gc_find_taggedvalue_pool(char *p, size_t *osiz
     size_t ofs = p - page_begin;
     int pg_idx = page_index(r, page_begin);
     // Check if this is a free page
-    if (!(r->allocmap[pg_idx / 32] & (uint32_t)(1 << (pg_idx % 32))))
+    if (!(neptune_get_allocmap(r)[pg_idx / 32] & (uint32_t)(1 << (pg_idx % 32))))
         return NULL;
-    jl_gc_pagemeta_t *pagemeta = &r->meta[pg_idx];
+    jl_gc_pagemeta_t *pagemeta = &(neptune_get_pagemeta(r)[pg_idx]);
     int osize = pagemeta->osize;
     // Shouldn't be needed, just in case
     if (osize == 0)
@@ -125,7 +126,7 @@ static void clear_mark(int bits)
 
     jl_taggedvalue_t *pv;
     for (int h = 0; h < REGION_COUNT; h++) {
-        region_t *region = &regions[h];
+        void *region = neptune_get_region(h);
         if (!region->pages)
             break;
         for (int pg_i = 0; pg_i < region->pg_cnt / 32; pg_i++) {
@@ -703,7 +704,7 @@ void jl_print_gc_stats(JL_STREAM *s)
                   (int)(total_fin_time * 100 / gc_num.total_time));
     }
     int i = 0;
-    while (i < REGION_COUNT && regions[i].pages) i++;
+    while (i < REGION_COUNT && neptune_get_pages(neptune_get_region(i))) i++;
     jl_printf(s, "max allocated regions : %d\n", i);
     struct mallinfo mi = mallinfo();
     jl_printf(s, "malloc size\t%d MB\n", mi.uordblks/1024/1024);
@@ -1007,12 +1008,12 @@ static void gc_count_pool_page(jl_gc_pagemeta_t *pg)
 
 static void gc_count_pool_region(region_t *region)
 {
-    for (int pg_i = 0; pg_i < region->pg_cnt / 32; pg_i++) {
-        uint32_t line = region->allocmap[pg_i];
+    for (int pg_i = 0; pg_i < neptune_get_pgcnt(region) / 32; pg_i++) {
+        uint32_t line = neptune_get_allocmap(region)[pg_i];
         if (line) {
             for (int j = 0; j < 32; j++) {
                 if ((line >> j) & 1) {
-                    gc_count_pool_page(&region->meta[pg_i*32 + j]);
+                    gc_count_pool_page(&(neptune_get_pagemeta(region)[pg_i*32 + j]));
                 }
             }
         }
@@ -1024,9 +1025,10 @@ void gc_count_pool(void)
     memset(&poolobj_sizes, 0, sizeof(poolobj_sizes));
     empty_pages = 0;
     for (int i = 0; i < REGION_COUNT; i++) {
-        if (!regions[i].pages)
+        region_t * region = neptune_get_region(i);
+        if (neptune_get_pgcnt(region) == 0) // TODO: FIX
             break;
-        gc_count_pool_region(&regions[i]);
+        gc_count_pool_region(region);
     }
     jl_safe_printf("****** Pool stat: ******\n");
     for (int i = 0;i < 4;i++)

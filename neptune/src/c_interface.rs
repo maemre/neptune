@@ -218,15 +218,86 @@ impl<'a> DerefMut for JlRegionArray<'a> {
 #[no_mangle]
 pub unsafe extern fn neptune_init_page_mgr() {
     PAGE_MGR = Some(PageMgr::new());
+    REGIONS = Some(Vec::with_capacity(REGION_COUNT));
+    let regions = REGIONS.as_mut().unwrap();
+    for i in 0..REGION_COUNT {
+        regions.push(Region::new()); // initialize regions
+    }
 }
 
 #[no_mangle]
-pub unsafe extern fn neptune_alloc_page<'a>(regions: * mut JlRegion<'a>) -> * mut u8 {
+pub unsafe extern fn neptune_alloc_page<'a>() -> * mut u8 {
     // if PAGE_MGR is uninitialized, we're better off crashing anyways
-    PAGE_MGR.as_mut().unwrap().alloc_page(&mut JlRegionArray::new(regions)).data.as_mut_ptr()
+    PAGE_MGR.as_mut().unwrap().alloc_page(&mut REGIONS.as_mut().unwrap()).data.as_mut_ptr()
 }
 
 #[no_mangle]
-pub unsafe extern fn neptune_free_page<'a>(regions: * mut JlRegion<'a>, page_size: usize, data: * const u8) {
-    PAGE_MGR.as_mut().unwrap().free_page(&mut JlRegionArray::new(regions), page_size, data);
+pub unsafe extern fn neptune_free_page<'a>(page_size: usize, data: * const u8) {
+    PAGE_MGR.as_mut().unwrap().free_page(REGIONS.as_mut().unwrap().as_mut_slice(), page_size, data);
+}
+
+// NB. I'm not happy with this being 'static The solution seems like
+// moving everything to Rust. Objects in the boundary will still have
+// static lifetime probably, since Rust cannot reason about lifetimes
+// crossing languages.
+static mut REGIONS: Option<Vec<Region<'static>>> = None;
+
+#[no_mangle]
+pub unsafe extern fn neptune_get_region(i: usize) -> &'static mut Region<'static> {
+    &mut REGIONS.as_mut().unwrap()[i]
+}
+
+// Find region given pointer is in
+// NOTE: This works because of null-pointer optimization on Option<&T>
+#[no_mangle]
+pub unsafe extern fn neptune_find_region(ptr: * const Page) -> Option<&'static mut Region<'static>> {
+    let mut regions = REGIONS.as_mut().unwrap();
+    for i in 0..regions.len() {
+        let begin = regions[i].pages.as_ptr();
+        let end = begin.offset(regions[i].pg_cnt as isize * mem::size_of::<Page>() as isize);
+        if ptr >= begin && ptr <= end {
+            return Some(&mut regions[i]);
+        }
+    }
+    None
+}
+
+#[no_mangle]
+pub extern fn neptune_get_pages<'a>(region: &'a mut Region<'a>) -> &'a mut [Page] {
+    &mut region.pages
+}
+
+#[no_mangle]
+pub extern fn neptune_get_allocmap<'a>(region: &'a mut Region<'a>) -> &'a mut [u32] {
+    region.allocmap
+}
+
+#[no_mangle]
+pub extern fn neptune_get_pagemeta<'a>(region: &'a mut Region<'a>) -> &'a mut [PageMeta<'a>] {
+    region.meta
+}
+
+#[no_mangle]
+pub extern fn neptune_get_lb<'a>(region: &mut Region<'a>) -> u32 {
+    region.lb
+}
+
+#[no_mangle]
+pub extern fn neptune_set_lb<'a>(region: &mut Region<'a>, lb: u32) {
+    region.lb = lb;
+}
+
+#[no_mangle]
+pub extern fn neptune_get_ub<'a>(region: &mut Region<'a>) -> u32 {
+    region.ub
+}
+
+#[no_mangle]
+pub extern fn neptune_set_ub<'a>(region: &mut Region<'a>, ub: u32) {
+    region.ub = ub;
+}
+
+#[no_mangle]
+pub extern fn neptune_get_pgcnt<'a>(region: &mut Region<'a>) -> u32 {
+    region.pg_cnt
 }

@@ -1,6 +1,7 @@
 // This file is a part of Julia. License is MIT: http://julialang.org/license
 
 #include "gc.h"
+#include "neptune.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,8 +48,6 @@ static jl_mutex_t gc_cache_lock;
 
 jl_gc_num_t gc_num = {0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 static size_t last_long_collect_interval;
-
-region_t regions[REGION_COUNT];
 
 // List of marked big objects.  Not per-thread.  Accessed only by master thread.
 bigval_t *big_objects_marked = NULL;
@@ -1086,18 +1085,18 @@ done:
 
 static void sweep_pool_region(jl_taggedvalue_t ***pfl, int region_i, int sweep_full)
 {
-    region_t *region = &regions[region_i];
+    region_t *region = neptune_get_region(region_i);
 
     // the actual sweeping
     int ub = 0;
-    int lb = region->lb;
-    for (int pg_i = 0; pg_i <= region->ub; pg_i++) {
-        uint32_t line = region->allocmap[pg_i];
+    int lb = neptune_get_lb(region);
+    for (int pg_i = 0; pg_i <= neptune_get_ub(region); pg_i++) {
+        uint32_t line = (neptune_get_allocmap(region))[pg_i];
         if (line) {
             ub = pg_i;
             for (int j = 0; j < 32; j++) {
                 if ((line >> j) & 1) {
-                    jl_gc_pagemeta_t *pg = &region->meta[pg_i*32 + j];
+                    jl_gc_pagemeta_t *pg = &(neptune_get_pagemeta(region)[pg_i*32 + j]);
                     int p_n = pg->pool_n;
                     int t_n = pg->thread_n;
                     jl_ptls_t ptls2 = jl_all_tls_states[t_n];
@@ -1111,8 +1110,8 @@ static void sweep_pool_region(jl_taggedvalue_t ***pfl, int region_i, int sweep_f
             lb = pg_i;
         }
     }
-    region->ub = ub;
-    region->lb = lb;
+    neptune_set_ub(region, ub);
+    neptune_set_lb(region, lb);
 }
 
 static void gc_sweep_other(jl_ptls_t ptls, int sweep_full)
@@ -1172,7 +1171,7 @@ static void gc_sweep_pool(int sweep_full)
     }
 
     for (int i = 0; i < REGION_COUNT; i++) {
-        if (!regions[i].pages)
+        if (neptune_get_pgcnt(neptune_get_region(i)) == 0) // TODO: FIX
             break;
         sweep_pool_region(pfl, i, sweep_full);
     }

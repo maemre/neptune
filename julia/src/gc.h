@@ -40,7 +40,7 @@ extern "C" {
 
 #define jl_malloc_tag ((void*)0xdeadaa01)
 #define jl_singleton_tag ((void*)0xdeadaa02)
-
+  
 // Used by GC_DEBUG_ENV
 typedef struct {
     uint64_t num;
@@ -155,25 +155,23 @@ __attribute__((aligned(GC_PAGE_SZ)))
 #endif
 ;
 
-typedef struct {
-    // Page layout:
-    //  Newpage freelist: sizeof(void*)
-    //  Padding: GC_PAGE_OFFSET - sizeof(void*)
-    //  Blocks: osize * n
-    //    Tag: sizeof(jl_taggedvalue_t)
-    //    Data: <= osize - sizeof(jl_taggedvalue_t)
-    jl_gc_page_t *pages; // [pg_cnt]; must be first, to preserve page alignment
-    uint32_t *allocmap; // [pg_cnt / 32]
-    jl_gc_pagemeta_t *meta; // [pg_cnt]
-    int pg_cnt;
-    // store a lower bound of the first free page in each region
-    int lb;
-    // an upper bound of the last non-free page
-    int ub;
-} region_t;
 
+// Abstract GC regions & move them to Rust
+typedef void region_t;
+    
+// region abstraction
+region_t * neptune_get_region(size_t i);
+jl_gc_page_t * neptune_get_pages(region_t * region);
+uint32_t * neptune_get_allocmap(region_t * region);
+jl_gc_pagemeta_t * neptune_get_pagemeta(region_t * region);
+uint32_t neptune_get_lb(region_t * region);
+uint32_t neptune_get_ub(region_t * region);
+void neptune_set_lb(region_t * region, uint32_t lb);
+void neptune_set_ub(region_t * region, uint32_t ub);
+uint32_t neptune_get_pgcnt(region_t * region);
+region_t * neptune_find_region(void *ptr);
+    
 extern jl_gc_num_t gc_num;
-extern region_t regions[REGION_COUNT];
 extern bigval_t *big_objects_marked;
 extern arraylist_t finalizer_list_marked;
 extern arraylist_t to_finalize;
@@ -202,7 +200,7 @@ STATIC_INLINE jl_taggedvalue_t *page_pfl_end(jl_gc_pagemeta_t *p)
 
 STATIC_INLINE int page_index(region_t *region, void *data)
 {
-    return (gc_page_data(data) - region->pages->data) / GC_PAGE_SZ;
+    return (gc_page_data(data) - neptune_get_pages(region)->data) / GC_PAGE_SZ;
 }
 
 STATIC_INLINE int gc_marked(uintptr_t bits)
@@ -232,28 +230,20 @@ STATIC_INLINE void *gc_ptr_clear_tag(void *v, uintptr_t mask)
 
 NOINLINE uintptr_t gc_get_stack_ptr(void);
 
-STATIC_INLINE region_t *find_region(void *ptr)
-{
-    for (int i = 0; i < REGION_COUNT && regions[i].pages; i++) {
-        region_t *region = &regions[i];
-        char *begin = region->pages->data;
-        char *end = begin + region->pg_cnt * sizeof(jl_gc_page_t);
-        if ((char*)ptr >= begin && (char*)ptr <= end) {
-            return region;
-        }
-    }
-    return NULL;
+STATIC_INLINE region_t *find_region(void *ptr) {
+  return neptune_find_region(ptr);
 }
 
 STATIC_INLINE jl_gc_pagemeta_t *page_metadata(void *_data)
 {
     uintptr_t data = ((uintptr_t)_data) - 1;
-    for (int i = 0; i < REGION_COUNT && regions[i].pages; i++) {
-        region_t *region = &regions[i];
-        uintptr_t begin = (uintptr_t)region->pages->data;
+    region_t *region = neptune_get_region(0);
+    for (int i = 0; i < REGION_COUNT && neptune_get_pages(region); i++) {
+        region = neptune_get_region(i);
+        uintptr_t begin = (uintptr_t)neptune_get_pages(region)->data;
         uintptr_t offset = data - begin;
-        if (offset < region->pg_cnt * sizeof(jl_gc_page_t)) {
-            return &region->meta[offset >> GC_PAGE_LG2];
+        if (offset < neptune_get_pgcnt(region) * sizeof(jl_gc_page_t)) {
+            return &(neptune_get_pagemeta(region)[offset >> GC_PAGE_LG2]);
         }
     }
     return NULL;
