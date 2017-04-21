@@ -5,8 +5,8 @@ extern crate libc;
 extern crate bit_field;
 extern crate core;
 
-#[cfg(test)]
-mod tests;
+//#[cfg(test)]
+//mod tests;
 
 mod gc;
 mod pages;

@@ -21,6 +21,9 @@ Write a simple GC in Rust to see it work
   - [ ] Write a simple mark and sweep garbage collector.
 - [0/3] Testing
   - [ ] Write some unit tests on Rust side to check liveness.
+        (according to Cargo's documentation, unit tests go in the file they're testing;
+         integration tests can go in the 'tests' directory)
+        (run with `cargo test`)
   - [ ] Test on Julia code with GC debug routines to make sure that the
       collection actually kicks in.
   - [ ] Test with valgrind to find memory leaks.

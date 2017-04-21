@@ -264,3 +264,53 @@ impl PageMgr {
         self.current_pg_count -= 1;
     }
 }
+
+// Testing stubs for pages
+#[cfg(test)]
+mod pages_tests {
+    use super::*;
+    
+    #[test]
+    fn test_clone() {
+        let arr = [42; PAGE_SZ];
+        let page = Page { data: arr };
+        let page2 = page.clone();
+        assert_eq!(42, 5+37);
+    }
+
+    #[test]
+    fn test_pagemgr_new() {
+        assert_eq!(42, 5+37);
+    }
+
+    #[test]
+    fn test_alloc_unmanaged_array() {
+        assert_eq!(42, 5+37);
+    }
+
+    #[test]
+    fn test_alloc_unmanaged_zeroed_array() {
+        assert_eq!(42, 5+37);
+    }
+
+    #[test]
+    fn test_alloc_region_mem() {
+        assert_eq!(42, 5+37);
+    }
+
+    #[test]
+    fn test_alloc_region() {
+        assert_eq!(42, 5+37);
+    }
+
+    #[test]
+    fn test_alloc_page() {
+        assert_eq!(42, 5+37);
+    }
+
+    #[test]
+    fn test_page() {
+        assert_eq!(42, 5+37);
+    }
+
+}
