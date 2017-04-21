@@ -77,24 +77,26 @@ impl<'a> Region<'a> {
         }
     }
 
-    // TODO: optimize with pointer arithmetic!
     pub fn index_of(&self, page: &Page) -> Option<usize> {
-        for (i, p) in self.pages.iter().enumerate() {
-            if p as *const Page == page as *const Page {
-                return Some(i);
-            }
-        }
-        None
+        self.index_of_raw(page.data.as_ptr())
     }
 
     // Find page with given data pointer
     pub fn index_of_raw(&self, data: * const u8) -> Option<usize> {
-        for (i, p) in self.pages.iter().enumerate() {
-            if p.data.as_ptr() == data {
-                return Some(i);
-            }
+        // for (i, p) in self.pages.iter().enumerate() {
+        //     if p.data.as_ptr() == data {
+        //         return Some(i);
+        //     }
+        // }
+        // None
+        // optimization of above with pointer arithmetic:
+        let offset = data as usize - self.pages.as_ptr() as usize;
+        if offset < 0 || offset >= self.pg_cnt as usize * PAGE_SZ {
+            // data is not in the region
+            None
+        } else {
+            Some(offset >> PAGE_LG2) // get the page id from offset
         }
-        None
     }
 }
 
