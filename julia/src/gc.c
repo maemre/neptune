@@ -60,11 +60,6 @@ bigval_t *big_objects_marked = NULL;
 arraylist_t finalizer_list_marked;
 arraylist_t to_finalize;
 
-NOINLINE uintptr_t gc_get_stack_ptr(void)
-{
-    return (uintptr_t)jl_get_frame_addr();
-}
-
 #define should_timeout() 0
 
 #ifdef JULIA_ENABLE_THREADING

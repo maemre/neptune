@@ -228,8 +228,6 @@ STATIC_INLINE void *gc_ptr_clear_tag(void *v, uintptr_t mask)
     return (void*)(((uintptr_t)v) & ~mask);
 }
 
-NOINLINE uintptr_t gc_get_stack_ptr(void);
-
 STATIC_INLINE region_t *find_region(void *ptr) {
   return neptune_find_region(ptr);
 }
