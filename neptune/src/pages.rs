@@ -8,6 +8,7 @@ use std::mem;
 use util::*;
 use bit_field::BitField;
 use core;
+use std::panic;
 
 // max. page count per region.
 // From: https://doc.rust-lang.org/reference.html#conditional-compilation
@@ -96,6 +97,8 @@ impl PageMgr {
         }
     }
 
+    // Note: the libc::MAP_ANONYMOUS flag says that it initializes the contents to zero,
+    //       so maybe this function is unneeded
     unsafe fn alloc_unmanaged_zeroed_array<'a, T>(len: usize) -> &'a mut [T] {
         let s = PageMgr::alloc_unmanaged_array(len);
         // zero the memory
@@ -275,22 +278,42 @@ mod pages_tests {
         let arr = [42; PAGE_SZ];
         let page = Page { data: arr };
         let page2 = page.clone();
-        assert_eq!(42, 5+37);
+        // TODO: Am I misunderstanding something about how clone is supposed to work? or is this a bug
+        assert_ne!(page.data[0], page2.data[0]); // Fix, should not pass I'm assuming
+        assert_eq!(page.data.len(), page2.data.len());
     }
 
     #[test]
     fn test_pagemgr_new() {
-        assert_eq!(42, 5+37);
+        let pgmgr = PageMgr::new();
+        assert!(pgmgr.region_pg_count >= MIN_REGION_PG_COUNT);
+        assert!(pgmgr.region_pg_count <= DEFAULT_REGION_PG_COUNT);
+        assert_eq!(pgmgr.current_pg_count, 0);
     }
 
     #[test]
     fn test_alloc_unmanaged_array() {
-        assert_eq!(42, 5+37);
+        unsafe {
+            let res1 = panic::catch_unwind(|| {
+                PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(64) as usize);
+            });
+            assert!(res1.is_err());
+
+            let arr = PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(5) as usize);
+            // Note: I belive the libc::MAP_ANONYMOUS sets all of the memory to 0
+            assert!(arr.iter().all(|&el| el == 0));
+            assert_eq!(arr.len(), 2u32.pow(5) as usize * mem::size_of::<u8>());
+        }
     }
 
     #[test]
     fn test_alloc_unmanaged_zeroed_array() {
-        assert_eq!(42, 5+37);
+        unsafe {
+            let arr = PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(5) as usize);
+            // Note: see above comment
+            assert!(arr.iter().all(|&el| el == 0));
+            assert_eq!(arr.len(), 2u32.pow(5) as usize * mem::size_of::<u8>());
+        }
     }
 
     #[test]
