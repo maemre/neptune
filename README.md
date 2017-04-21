@@ -53,9 +53,15 @@ which skip checking Julia and only link it with Neptune after building Neptune:
 
 ### Debug builds
 
-If you want to debug Neptune, you can build it with `cargo build --debug` then
+If you want to debug Neptune, you can build it with `cargo build` then
 link it with Julia.  To debug Julia itself, follow the guidelines in Julia's
-`README.md` file.
+`README.md` file. I.e.
+```
+$ cd neptune
+$ cargo build
+$ cd ../julia
+$ make debug # this should link it now
+```
 
 ### Testing the build
 

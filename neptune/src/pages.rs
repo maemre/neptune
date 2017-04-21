@@ -10,6 +10,12 @@ use bit_field::BitField;
 use core;
 
 // max. page count per region.
+// From: https://doc.rust-lang.org/reference.html#conditional-compilation
+//  other possible configurations to use:
+//  1. * target_arch="x86_64"
+//     * target_arch="x64"
+//  2. * target_pointer_width="32"
+//     * target_pointer_width="64"
 #[cfg(archbits="32")]
 pub const DEFAULT_REGION_PG_COUNT: usize = 8 * 4096; // 512 MB
 #[cfg(not(archbits="32"))] // 64-bit
@@ -48,6 +54,9 @@ impl PageMgr {
                 rlim_cur: 0,
                 rlim_max: 0
             };
+            
+            // check what size page it's using, before we do any possible exponential decrease
+            println!("page count: {}", region_pg_count);
 
             unsafe {
                 // an exponential decrease to find limit within a binary order of magnitude quickly

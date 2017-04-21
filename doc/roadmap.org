@@ -3,6 +3,12 @@
 
 * Link Neptune and Julia
 - [X] Modify the Makefiles to link Neptune and Julia, then test it by calling some simple stub in Rust side from C to see that it doesn't crash.
+- [ ] Fix Michael's build...
+      Currently I'm having trouble running 'make debug' from within the 'julia'
+      directory. When it tries building usr/lib/julia/inference.ji, it segfaults
+      after printing the statements in neptune/src/pages.rs, which prints the page size.
+      More investigation needs to be done to see whether this is a symptom specific
+      to my system or not.
 
 * A simple GC
 Write a simple GC in Rust to see it work
