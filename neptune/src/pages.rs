@@ -329,12 +329,11 @@ mod pages_tests {
     fn test_alloc_unmanaged_array() {
         unsafe {
             let res1 = panic::catch_unwind(|| {
-                PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(64) as usize);
+                PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(64) as usize, None);
             });
             assert!(res1.is_err());
 
-            let arr = PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(5) as usize);
-            // Note: I belive the libc::MAP_ANONYMOUS sets all of the memory to 0
+            let arr = PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(5) as usize, None);
             assert!(arr.iter().all(|&el| el == 0));
             assert_eq!(arr.len(), 2u32.pow(5) as usize * mem::size_of::<u8>());
         }
@@ -343,10 +342,24 @@ mod pages_tests {
     #[test]
     fn test_alloc_unmanaged_zeroed_array() {
         unsafe {
-            let arr = PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(5) as usize);
+            let arr = PageMgr::alloc_unmanaged_array::<u8>(2u32.pow(5) as usize, None);
             // Note: see above comment
             assert!(arr.iter().all(|&el| el == 0));
             assert_eq!(arr.len(), 2u32.pow(5) as usize * mem::size_of::<u8>());
+        }
+    }
+
+    #[test]
+    fn test_unmanaged_array_alignment() {
+        for alignment in &[1usize, 2, 4, 8, 32, 1024, 64 * 1024, 128 * 1024, 256 * 1024] {
+            // make sure that alignment is a power of two
+            assert_eq!(alignment.count_ones(), 1);
+            unsafe {
+                let plain = PageMgr::alloc_unmanaged_array::<u32>(2usize.pow(5) as usize, Some(alignment.clone()));
+                assert!((plain.as_ptr() as usize).trailing_zeros() >= alignment.trailing_zeros());
+                let zeroed = PageMgr::alloc_unmanaged_zeroed_array::<u32>(2usize.pow(5) as usize, Some(alignment.clone()));
+                assert!((zeroed.as_ptr() as usize).trailing_zeros() >= alignment.trailing_zeros());
+            }
         }
     }
 
