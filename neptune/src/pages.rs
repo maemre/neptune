@@ -5,6 +5,7 @@ use gc::*;
 use c_interface::*;
 use libc;
 use std::mem;
+use std::cmp;
 use util::*;
 use bit_field::BitField;
 use core;
@@ -75,21 +76,54 @@ impl PageMgr {
         }
     }
 
-    unsafe fn alloc_unmanaged_array<'a, T>(len: usize) -> &'a mut [T] {
+    // Compute a pointer to the beginning of the page given data pointer lies in
+    #[inline(always)]
+    unsafe fn align_to_boundary(ptr: * const u8, boundary: usize) -> * const u8 {
+        assert_eq!(boundary, boundary.next_power_of_two());
+        let bound_lg2 = boundary.trailing_zeros();
+        ((ptr as usize >> bound_lg2) << bound_lg2) as * const u8
+    }
+    
+    // Mutable version of page_of
+    #[inline(always)]
+    unsafe fn align_to_boundary_mut(ptr: * mut u8, boundary: usize) -> * mut u8 {
+        assert_eq!(boundary, boundary.next_power_of_two());
+        let bound_lg2 = boundary.trailing_zeros();
+        ((ptr as usize >> bound_lg2) << bound_lg2) as * mut u8
+    }
+    
+    unsafe fn alloc_unmanaged_array<'a, T>(len: usize, alignment: Option<usize>) -> &'a mut [T] {
         match len.checked_mul(mem::size_of::<T>()) {
             Some(size) => {
+                // alignment guaranteed by the system
+                let sys_alignment = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+                // max. of requested alignment and type's required alignment
+                let align = alignment.unwrap_or(cmp::max(sys_alignment, mem::align_of::<T>()));
+                let allocsz = if align > sys_alignment {
+                    // if our page alignment is larger than system page size, allocate extra memory
+                    // to compensate the alignment memory bump
+                    size + align
+                } else {
+                    size
+                };
                 // allocate the memory
-                let m = libc::mmap(core::ptr::null_mut(),
-                                   size,
-                                   libc::PROT_READ | libc::PROT_WRITE,
-                                   libc::MAP_NORESERVE | libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                                   -1,
-                                   0);
+                let m: * mut u8 = mem::transmute(libc::mmap(core::ptr::null_mut(),
+                                                            allocsz,
+                                                            libc::PROT_READ | libc::PROT_WRITE,
+                                                            libc::MAP_NORESERVE | libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                                                            -1,
+                                                            0));
                 if m == core::ptr::null_mut() {
                     panic!("Memory error: mmap failed!");
                 }
+                // align to nearest given alignment
+                let begin = if align > sys_alignment {
+                    PageMgr::align_to_boundary_mut(m.offset(align as isize - 1), align)
+                } else {
+                    m
+                };
                 // memory alchemy! make it a Rust slice
-                ::std::slice::from_raw_parts_mut(mem::transmute(m), size)
+                ::std::slice::from_raw_parts_mut(mem::transmute(begin), size)
             }
             None => {
                 panic!("Memory error: requested array's size is greater than 2^64!");
@@ -99,8 +133,8 @@ impl PageMgr {
 
     // Note: the libc::MAP_ANONYMOUS flag says that it initializes the contents to zero,
     //       so maybe this function is unneeded
-    unsafe fn alloc_unmanaged_zeroed_array<'a, T>(len: usize) -> &'a mut [T] {
-        let s = PageMgr::alloc_unmanaged_array(len);
+    unsafe fn alloc_unmanaged_zeroed_array<'a, T>(len: usize, alignment: Option<usize>) -> &'a mut [T] {
+        let s = PageMgr::alloc_unmanaged_array(len, alignment);
         // zero the memory
         libc::memset(mem::transmute(s.as_mut_ptr()), 0, len * mem::size_of::<T>());
         s
@@ -115,14 +149,14 @@ impl PageMgr {
         println!("page count: {}", pg_cnt);
         // TODO: handle failure for this gracefully
         region.pages = unsafe {
-            PageMgr::alloc_unmanaged_array(pg_cnt)
+            PageMgr::alloc_unmanaged_array(pg_cnt, Some(PAGE_SZ))
         };
         region.allocmap = unsafe {
-            PageMgr::alloc_unmanaged_zeroed_array(pg_cnt / 32)
+            PageMgr::alloc_unmanaged_zeroed_array(pg_cnt / 32, None)
         };
         // mmap hack time
         region.meta = unsafe {
-            PageMgr::alloc_unmanaged_zeroed_array(pg_cnt)
+            PageMgr::alloc_unmanaged_zeroed_array(pg_cnt, None)
         };
         region.pg_cnt = pg_cnt as u32;
         // TODO: commit meta and allocmap
