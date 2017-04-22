@@ -27,11 +27,9 @@ pub type GcFrame = libc::c_void;
 extern {
     pub fn gc_final_count_page(pg_cnt: usize);
     pub fn jl_gc_wait_for_the_world(); // wait for the world to stop
-}
 
-#[no_mangle]
-pub extern fn link_test(n: u32) -> u32 {
-    n * (n - 1) / 2
+    // mark boxed caches, which don't contain any pointers hence are terminal nodes
+    pub fn jl_mark_box_caches(ptls: &mut JlTLS);
 }
 
 pub fn gc_init<'a>(page_size: usize) -> Box<Gc<'a>> {
@@ -126,7 +124,7 @@ pub struct JlTLS {
     pub gc_cache: GcMarkCache,
 }
 
-type JlPTLS = Option<JlTLS>; // this is just a pointer to thread-local state
+type JlPTLS<'a> = Option<&'a JlTLS>; // this is just a pointer to thread-local state
 
 // Note: We represent sig_atomic_t as c_int since C99 standard says so.
 pub type sig_atomic_t = c_int;

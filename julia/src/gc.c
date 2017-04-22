@@ -2084,9 +2084,6 @@ void jl_mk_thread_heap(jl_ptls_t ptls)
 // System-wide initializations
 void jl_gc_init(void)
 {
-  uint32_t n = link_test(5);
-  printf("passed 5, got %ud", n);
-
     jl_gc_init_page();
     gc_debug_init();
 
