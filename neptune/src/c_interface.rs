@@ -252,7 +252,8 @@ pub unsafe extern fn neptune_find_region(ptr: * const Page) -> Option<&'static m
     let mut regions = REGIONS.as_mut().unwrap();
     for i in 0..regions.len() {
         let begin = regions[i].pages.as_ptr();
-        let end = begin.offset(regions[i].pg_cnt as isize * mem::size_of::<Page>() as isize);
+        // pointer arithmetic to find end of region
+        let end = begin.offset(regions[i].pg_cnt as isize);
         if ptr >= begin && ptr <= end {
             return Some(&mut regions[i]);
         }
@@ -261,18 +262,18 @@ pub unsafe extern fn neptune_find_region(ptr: * const Page) -> Option<&'static m
 }
 
 #[no_mangle]
-pub extern fn neptune_get_pages<'a>(region: &'a mut Region<'a>) -> &'a mut [Page] {
-    &mut region.pages
+pub unsafe extern fn neptune_get_pages<'a>(region: &'a mut Region<'a>) -> * mut Page {
+    region.pages.as_mut_ptr()
 }
 
 #[no_mangle]
-pub extern fn neptune_get_allocmap<'a>(region: &'a mut Region<'a>) -> &'a mut [u32] {
-    region.allocmap
+pub unsafe extern fn neptune_get_allocmap<'a>(region: &'a mut Region<'a>) -> * mut u32 {
+    region.allocmap.as_mut_ptr()
 }
 
 #[no_mangle]
-pub extern fn neptune_get_pagemeta<'a>(region: &'a mut Region<'a>) -> &'a mut [PageMeta<'a>] {
-    region.meta
+pub unsafe extern fn neptune_get_pagemeta<'a>(region: &'a mut Region<'a>) -> * mut PageMeta<'a> {
+    region.meta.as_mut_ptr()
 }
 
 #[no_mangle]

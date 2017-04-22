@@ -113,8 +113,8 @@ pub struct PageMeta<'a> {
     pub fl_begin_offset: u16, // offset of the first free object
     pub fl_end_offset:   u16, // offset of the last free object
     pub thread_n: u16, // thread id of the heap that owns this page
-    pub data: Option<&'a mut [u8]>,
-    pub ages: Option<&'a mut [u8]>,
+    pub data: Option<Box<&'a mut [u8]>>,
+    pub ages: Option<Box<&'a mut [u8]>>,
 }
 
 impl<'a> PageMeta<'a> {
