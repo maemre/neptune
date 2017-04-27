@@ -30,6 +30,9 @@ extern {
 
     // mark boxed caches, which don't contain any pointers hence are terminal nodes
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
+
+    // set type of a value by setting the tag
+    pub fn jl_set_typeof(v: &mut JlValue, typ: * const c_void);
 }
 
 pub fn gc_init<'a>(page_size: usize) -> Box<Gc<'a>> {
@@ -238,7 +241,7 @@ pub unsafe extern fn neptune_free_page<'a>(page_size: usize, data: * const u8) {
 // moving everything to Rust. Objects in the boundary will still have
 // static lifetime probably, since Rust cannot reason about lifetimes
 // crossing languages.
-static mut REGIONS: Option<Vec<Region<'static>>> = None;
+pub static mut REGIONS: Option<Vec<Region<'static>>> = None;
 
 #[no_mangle]
 pub unsafe extern fn neptune_get_region(i: usize) -> &'static mut Region<'static> {

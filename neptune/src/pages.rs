@@ -33,6 +33,15 @@ pub struct Page {
     pub data: [u8; PAGE_SZ]
 }
 
+impl Page {
+    pub fn of<T>(ptr: &T) -> * const u8 {
+        Page::of_raw(ptr)
+    }
+    pub fn of_raw<T>(ptr: * const T) -> * const u8 {
+        unsafe { PageMgr::align_to_boundary(ptr as * const u8, PAGE_SZ) }
+    }
+}
+
 impl Clone for Page {
     // unfortunately, clone is not implemented for arrays with size > 32 so we need to
     // do some memory transmutation.
@@ -75,7 +84,7 @@ impl PageMgr {
             current_pg_count: 0,
         }
     }
-
+    
     // Compute a pointer to the beginning of the page given data pointer lies in
     #[inline(always)]
     unsafe fn align_to_boundary(ptr: * const u8, boundary: usize) -> * const u8 {
@@ -299,6 +308,22 @@ impl PageMgr {
         }
 
         self.current_pg_count -= 1;
+    }
+
+    pub unsafe fn find_pagemeta<T>(&self, ptr: * const T) -> Option<&'static mut PageMeta<'static>> {
+        let regions = REGIONS.as_mut().unwrap();
+        for region in regions.iter_mut() {
+            if region.pg_cnt == 0 {
+                // we are done with all initialized regions
+                // N.B. if we change region allocation algorithm, we need to revisit this
+                return None;
+            }
+
+            if let Some(i) = region.index_of_raw(ptr as * const u8) {
+                return Some(&mut region.meta[i]);
+            }
+        }
+        None
     }
 }
 

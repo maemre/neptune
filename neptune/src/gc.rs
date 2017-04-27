@@ -17,20 +17,20 @@ pub const PAGE_SZ: usize = 1 << PAGE_LG2; // 16k
 // GC stats. This is equivalent of jl_gc_num_t in Julia
 #[repr(C)]
 pub struct GcNum {
-    allocd:         i64,
-    deferred_alloc: i64,
-    freed:          i64,
-    malloc:         u64,
-    realloc:        u64,
-    poolalloc:      u64,
-    bigalloc:       u64,
-    freecall:       u64,
-    total_time:     u64,
-    total_allocd:   u64,
-    since_sweep:    u64,
-    interval:       usize,
-    pause:          c_int,
-    full_sweep:     c_int
+    pub allocd:         i64,
+    pub deferred_alloc: i64,
+    pub freed:          i64,
+    pub malloc:         u64,
+    pub realloc:        u64,
+    pub poolalloc:      u64,
+    pub bigalloc:       u64,
+    pub freecall:       u64,
+    pub total_time:     u64,
+    pub total_allocd:   u64,
+    pub since_sweep:    u64,
+    pub interval:       usize,
+    pub pause:          c_int,
+    pub full_sweep:     c_int
 }
 
 impl GcNum {
