@@ -66,8 +66,8 @@ else
 CXXLD := $(LD)
 endif
 
-$(build_bindir)/julia$(EXE): $(OBJS)
-	@$(call PRINT_LINK, $(CXXLD) $(CXXFLAGS) $(CXXLDFLAGS) $(LINK_FLAGS) $(SHIPFLAGS) $^ -o $@ -L$(build_private_libdir) -L$(build_libdir) -L$(build_shlibdir) -ljulia $(JLDFLAGS) $(CXXLDFLAGS))
+$(build_bindir)/julia$(EXE): $(OBJS) $(NEPTUNEHOME)/target/release/libneptune.a
+	@$(call PRINT_LINK, $(CXXLD) $(CXXFLAGS) $(CXXLDFLAGS) $(LINK_FLAGS) $(SHIPFLAGS) $^ -o $@ -L$(build_private_libdir) -L$(build_libdir) -L$(build_shlibdir) -L$(NEPTUNEHOME)/target/release $(NEPTUNEDEPS) -lneptune -ljulia $(JLDFLAGS) $(CXXLDFLAGS))
 $(build_bindir)/julia-debug$(EXE): $(DOBJS) $(NEPTUNEHOME)/target/debug/libneptune.a
 	@$(call PRINT_LINK, $(CXXLD) $(CXXFLAGS) $(CXXLDFLAGS) $(LINK_FLAGS) $(DEBUGFLAGS) $^ -o $@ -L$(build_private_libdir) -L$(build_libdir) -L$(build_shlibdir) -L$(NEPTUNEHOME)/target/debug $(NEPTUNEDEPS) -lneptune -ljulia-debug $(JLDFLAGS) $(CXXLDFLAGS))
 

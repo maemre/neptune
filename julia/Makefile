@@ -93,7 +93,7 @@ julia-ui-release julia-ui-debug : julia-ui-% : julia-src-%
 	@$(MAKE) $(QUIET_MAKE) -C $(BUILDROOT)/ui julia-$*
 
 julia-inference : julia-base julia-ui-$(JULIA_BUILD_MODE) $(build_prefix)/.examples
-	@$(MAKE) $(QUIET_MAKE) -C $(BUILDROOT) $(build_private_libdir)/inference.ji JULIA_BUILD_MODE=$(JULIA_BUILD_MODE)
+	$(MAKE) $(QUIET_MAKE) -C $(BUILDROOT) $(build_private_libdir)/inference.ji JULIA_BUILD_MODE=$(JULIA_BUILD_MODE)
 
 ifneq ($(CPUID_SPECIFIC_BINARIES), 0)
 CPUID_TAG = _$(call exec,$(JULIA_EXECUTABLE) --cpuid)
@@ -207,7 +207,7 @@ CORE_SRCS := $(addprefix $(JULIAHOME)/, \
 BASE_SRCS := $(sort $(shell find $(JULIAHOME)/base -name \*.jl) $(shell find $(BUILDROOT)/base -name \*.jl))
 
 $(build_private_libdir)/inference.ji: $(CORE_SRCS) | $(build_private_libdir)
-	@$(call PRINT_JULIA, cd $(JULIAHOME)/base && \
+	$(call PRINT_JULIA, cd $(JULIAHOME)/base && \
 	$(call spawn,$(JULIA_EXECUTABLE)) -C $(JULIA_CPU_TARGET) --output-ji $(call cygpath_w,$@) \
 		--startup-file=no -g0 -O0 coreimg.jl)
 
