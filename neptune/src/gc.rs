@@ -225,11 +225,17 @@ impl<'a> Finalizer<'a> {
 // representation of big objects
 #[repr(C)]
 pub struct BigVal {
-    next: Box<BigVal>,
-    prev: Box<BigVal>,
+    //next: Box<BigVal>,
+    //prev: Box<BigVal>,
     szOrAge: usize, // unpack this union via methods
     padding: [u8; 32], // to align to 64 bits
     headerOrBits: usize // unpack this union via methods
+}
+
+impl BigVal {
+    pub fn new(s: usize, h: usize) -> Self {
+        BigVal { szOrAge: s, padding: [0; 32], headerOrBits: h }
+    }
 }
 
 // list of malloc'd arrays

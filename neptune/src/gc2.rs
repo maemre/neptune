@@ -6,6 +6,7 @@ use c_interface::JlValue;
 use c_interface::*;
 use bit_field::BitField;
 use alloc;
+use std::collections::VecDeque;
 
 // this is actually just the tag
 struct JlTaggedValue {
@@ -40,6 +41,33 @@ static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
 ];
 const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(), size_of isn't a const fn yet :(
 
+/*
+ * in julia/src/julia.h:
+ *
+ *   struct _jl_taggedvalue_bits {
+ *     uintptr_t gc:2;
+ *   };
+ *
+ *   struct _jl_taggedvalue_t {
+ *      union {
+ *          uintptr_t header;
+ *          jl_taggedvalue_t *next;
+ *          jl_value_t *type; // 16-byte-aligned
+ *          struct_jl_taggedvalue_bits bits;
+ *      };
+ *      // jl_value_t value;
+ *   };
+ *
+ * The tag is stored before the pointer, so if the user has a value 'v', to treat it
+ * as a tagged value, Julia uses the following macro, subtracting the size of the
+ * tag value struct itself from the pointer.
+ *
+ *  #define jl_astaggedvalue(v) \
+ *    ((jl_taggedvalue_t*)((char*)(v) - sizeof(jl_taggedvalue_t)))
+ *
+ * The value itself is stored after the header, so they simply take the value pointer
+ * and add the size of the header, to get the pointer to the value it stores
+ */
 impl JlTaggedValue {
     
     // implement union members by transmuting memory
@@ -59,6 +87,44 @@ impl JlTaggedValue {
     // this will panic if one tries to set bits higher than lowest TAG_BITS bits
     pub unsafe fn set_tag(&mut self, tag: u8) {
         self.header.set_bits(0..TAG_BITS, tag as usize);
+    }
+}
+
+#[cfg(test)]
+mod jltagged_value_tests {
+    use super::*;
+
+    #[test]
+    fn test_create() {
+        // Note: a JlValue is just a libc::c_void type (in c_interface.rs)
+        unsafe {
+            let i: *mut i64 = libc::malloc(mem::size_of::<i64>()) as *mut i64;
+            *i = 42;
+            assert_eq!(*i, 42);
+            libc::free(i as *mut JlValue);
+            // TODO finish test
+            let v = JlTaggedValue { header: 0 };
+        }
+    }
+
+    #[test]
+    fn test_next() {
+    }
+
+    #[test]
+    fn test_next_mut() {
+    }
+
+    #[test]
+    fn test_typ() {
+    }
+
+    #[test]
+    fn test_tag() {
+    }
+
+    #[test]
+    fn test_set_tag() {
     }
 }
 
@@ -126,7 +192,7 @@ pub struct ThreadHeap<'a> {
     mallocarrays: Vec<MallocArray>,
     mafreelist: Vec<MallocArray>,
     // big objects
-    big_objects: BigVal, // TODO: use linked list
+    big_objects: VecDeque<BigVal>,
     // remset
     rem_bindings: Vec<JlBinding<'a>>,
     remset: Vec<* mut JlValue>,
@@ -216,13 +282,14 @@ impl<'a> Gc2<'a> {
             // TODO: or we can call:
             //       self.big_alloc(size)
         };
-        let mut pool = self.heap.pools[poolIndex];
+        let pool = &mut self.heap.pools[poolIndex];
         // TODO: check if pool is full, see below...
         // TODO: I'm not sure how to use pool.newpages yet...
         match pool.freelist.pop() {
             Some(v) => {
-                let r: &mut libc::c_void = unsafe { &mut *v.typ() };
-                r
+                //let r = unsafe { &mut v.typ() };
+                //r
+                panic!("Memory error: pool_alloc() unimplemented")
             },
             None => panic!("Memory error: no objects in pool free list")
         }
@@ -242,8 +309,13 @@ impl<'a> Gc2<'a> {
     }
     
     fn big_alloc(&mut self, size: usize) -> &mut JlValue {
-        // TODO: actually handle this rather than piggybacking on Rust
-        self.rust_alloc(size)
+        // TODO: this is all wrong; I'm just trying to get it to compile
+        // TODO actually take into account 'size' in creating something of
+        //      that size.
+        let bv = BigVal::new(size, 0);
+        self.heap.big_objects.push_back(bv);
+        //self.heap.big_objects.back_mut().unwrap()
+        panic!("GC error: unimplemented 'big_alloc'")
     }
 
     pub fn rust_alloc(&mut self, size: usize) -> &mut JlValue {
