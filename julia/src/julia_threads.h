@@ -28,6 +28,8 @@
 #endif
 #include <signal.h>
 
+#include "neptune_threads.h"
+
 typedef struct {
     jl_taggedvalue_t *freelist;   // root of list of free objects
     jl_taggedvalue_t *newpages;   // root of list of chunks of free objects
@@ -137,6 +139,8 @@ typedef struct _jl_tls_states_t {
     int finalizers_inhibited;
     arraylist_t finalizers;
     jl_gc_mark_cache_t gc_cache;
+
+    tl_gcs_t *tl_gcs;
 } jl_tls_states_t;
 typedef jl_tls_states_t *jl_ptls_t;
 

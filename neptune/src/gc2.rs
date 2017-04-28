@@ -271,13 +271,13 @@ impl<'a> Gc2<'a> {
             self.big_alloc(allocsz)
         };
         unsafe {
-            jl_set_typeof(v, typ);
+            np_jl_set_typeof(v, typ);
         }
         v
     }
 
     // Semi-equivalent(?) to: julia/src/gc.c:jl_gc_pool_alloc
-    fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
+    pub fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
         match self.find_pool(&size) {
             Some(poolIndex) => {
                 let mut pool = &mut self.heap.pools[poolIndex];
@@ -313,7 +313,7 @@ impl<'a> Gc2<'a> {
             })
     }
     
-    fn big_alloc(&mut self, size: usize) -> &mut JlValue {
+    pub fn big_alloc(&mut self, size: usize) -> &mut JlValue {
         // TODO: this is all wrong; I'm just trying to get it to compile
         // TODO actually take into account 'size' in creating something of
         //      that size.

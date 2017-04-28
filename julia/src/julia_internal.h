@@ -122,6 +122,9 @@ extern size_t jl_typeinf_world;
 JL_DLLEXPORT extern int jl_lineno;
 JL_DLLEXPORT extern const char *jl_filename;
 
+// neptune's predefined entry points
+#include "neptune_predef.h"
+  
 JL_DLLEXPORT jl_value_t *jl_gc_pool_alloc(jl_ptls_t ptls, int pool_offset,
                                           int osize);
 JL_DLLEXPORT jl_value_t *jl_gc_big_alloc(jl_ptls_t ptls, size_t allocsz);
@@ -225,27 +228,7 @@ STATIC_INLINE int JL_CONST_FUNC jl_gc_szclass(size_t sz)
 
 STATIC_INLINE jl_value_t *jl_gc_alloc_(jl_ptls_t ptls, size_t sz, void *ty)
 {
-    const size_t allocsz = sz + sizeof(jl_taggedvalue_t);
-    if (allocsz < sz) // overflow in adding offs, size was "negative"
-        jl_throw(jl_memory_exception);
-    jl_value_t *v;
-    if (allocsz <= GC_MAX_SZCLASS + sizeof(jl_taggedvalue_t)) {
-        int pool_id = jl_gc_szclass(allocsz);
-        jl_gc_pool_t *p = &ptls->heap.norm_pools[pool_id];
-        int osize;
-        if (jl_is_constexpr(allocsz)) {
-            osize = jl_gc_sizeclasses[pool_id];
-        }
-        else {
-            osize = p->osize;
-        }
-        v = jl_gc_pool_alloc(ptls, (char*)p - (char*)ptls, osize);
-    }
-    else {
-        v = jl_gc_big_alloc(ptls, allocsz);
-    }
-    jl_set_typeof(v, ty);
-    return v;
+    return neptune_alloc(ptls->tl_gcs, sz, ty);
 }
 JL_DLLEXPORT jl_value_t *jl_gc_alloc(jl_ptls_t ptls, size_t sz, void *ty);
 // On GCC, only inline when sz is constant

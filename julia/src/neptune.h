@@ -1,6 +1,9 @@
 #ifndef NEPTUNE_H
 #define NEPTUNE_H
-#define NEPTUNE 0xC60D
+
+#ifndef NEPTUNE_PREDEF_H
+#include "neptune_predef.h"
+#endif
 
 #include "gc.h"
 

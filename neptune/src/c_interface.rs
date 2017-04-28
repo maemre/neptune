@@ -4,6 +4,7 @@
 // destructor order.
 
 use gc::*;
+use gc2::*;
 use libc::c_int;
 use libc::c_void;
 use libc::c_uint;
@@ -32,7 +33,7 @@ extern {
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
 
     // set type of a value by setting the tag
-    pub fn jl_set_typeof(v: &mut JlValue, typ: * const c_void);
+    pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
 }
 
 pub fn gc_init<'a>(page_size: usize) -> Box<Gc<'a>> {
@@ -216,6 +217,9 @@ impl<'a> DerefMut for JlRegionArray<'a> {
     }
 }
 
+//------------------------------------------------------------------------------
+// Page manager
+
 #[no_mangle]
 pub unsafe extern fn neptune_init_page_mgr() {
     PAGE_MGR = Some(PageMgr::new());
@@ -236,6 +240,9 @@ pub unsafe extern fn neptune_alloc_page<'a>() -> * mut u8 {
 pub unsafe extern fn neptune_free_page<'a>(page_size: usize, data: * const u8) {
     PAGE_MGR.as_mut().unwrap().free_page(REGIONS.as_mut().unwrap().as_mut_slice(), page_size, data);
 }
+
+//------------------------------------------------------------------------------
+// Region related exports
 
 // NB. I'm not happy with this being 'static The solution seems like
 // moving everything to Rust. Objects in the boundary will still have
@@ -302,4 +309,22 @@ pub extern fn neptune_set_ub<'a>(region: &mut Region<'a>, ub: u32) {
 #[no_mangle]
 pub extern fn neptune_get_pgcnt<'a>(region: &mut Region<'a>) -> u32 {
     region.pg_cnt
+}
+
+//------------------------------------------------------------------------------
+// GC entry points
+
+#[no_mangle]
+pub extern fn neptune_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize, typ: * const libc::c_void) -> &'gc mut JlValue {
+    gc.alloc(size, typ)
+}
+
+#[no_mangle]
+pub extern fn neptune_pool_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize) -> &'gc mut JlValue {
+    gc.pool_alloc(size)
+}
+
+#[no_mangle]
+pub extern fn neptune_big_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize) -> &'gc mut JlValue {
+    gc.big_alloc(size)
 }
