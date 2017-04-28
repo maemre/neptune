@@ -80,6 +80,9 @@ impl JlTaggedValue {
     pub unsafe fn typ(&self) -> * const JlValue {
         mem::transmute(self)
     }
+    pub unsafe fn typ_mut(&mut self) -> &mut JlValue {
+        mem::transmute(self)
+    }
     // this is bits in Julia
     pub unsafe fn tag(&self) -> libc::uintptr_t {
         self.header.get_bits(0..TAG_BITS)
@@ -256,6 +259,7 @@ impl<'a> Gc2<'a> {
     }
     
     // allocate a Julia object
+    // Semi-equivalent(?) to: julia/src/gc.c:jl_gc_alloc
     pub fn alloc(&mut self, size: usize, typ: * const libc::c_void) -> &mut JlValue {
         let allocsz = match size.checked_add(mem::size_of::<JlTaggedValue>()) {
             Some(s) => s,
@@ -272,26 +276,27 @@ impl<'a> Gc2<'a> {
         v
     }
 
+    // Semi-equivalent(?) to: julia/src/gc.c:jl_gc_pool_alloc
     fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
-        let poolIndex = match self.find_pool(&size) {
-            Some(i) => i,
-            None => panic!("Memory error: no pool of necessary size")
-            // If this happens, user should have called 'alloc'
-            // first, which will handle calling 'big_alloc' instead
-            // if necessary (i.e. no pools)
-            // TODO: or we can call:
-            //       self.big_alloc(size)
-        };
-        let pool = &mut self.heap.pools[poolIndex];
-        // TODO: check if pool is full, see below...
-        // TODO: I'm not sure how to use pool.newpages yet...
-        match pool.freelist.pop() {
-            Some(v) => {
-                //let r = unsafe { &mut v.typ() };
-                //r
-                panic!("Memory error: pool_alloc() unimplemented")
+        match self.find_pool(&size) {
+            Some(poolIndex) => {
+                let mut pool = &mut self.heap.pools[poolIndex];
+                // TODO: check if pool is full, see below...
+                // TODO: I'm not sure how to use pool.newpages yet...
+                match pool.freelist.pop() {
+                    Some(v) => {
+                        //unsafe { v.typ_mut() }
+                        panic!("Memory error: pool_alloc() unimplemented")
+                    },
+                    None => panic!("Memory error: no objects in pool free list")
+                }
             },
-            None => panic!("Memory error: no objects in pool free list")
+            None => {
+                // If this happens, user should have called 'alloc'
+                // first, which will handle calling 'big_alloc' instead
+                // if necessary (i.e. no pools); just do it for them
+                self.big_alloc(size)
+            }
         }
     }
 
