@@ -206,8 +206,26 @@ impl<'a> Gc2<'a> {
         v
     }
 
-    pub fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
-        self.rust_alloc(size)
+    fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
+        let poolIndex = match self.find_pool(&size) {
+            Some(i) => i,
+            None => panic!("Memory error: no pool of necessary size")
+            // If this happens, user should have called 'alloc'
+            // first, which will handle calling 'big_alloc' instead
+            // if necessary (i.e. no pools)
+            // TODO: or we can call:
+            //       self.big_alloc(size)
+        };
+        let mut pool = self.heap.pools[poolIndex];
+        // TODO: check if pool is full, see below...
+        // TODO: I'm not sure how to use pool.newpages yet...
+        match pool.freelist.pop() {
+            Some(v) => {
+                let r: &mut libc::c_void = unsafe { &mut *v.typ() };
+                r
+            },
+            None => panic!("Memory error: no objects in pool free list")
+        }
     }
 
     pub fn find_pool(&self, size: &usize) -> Option<usize> {
@@ -223,7 +241,7 @@ impl<'a> Gc2<'a> {
             })
     }
     
-    pub fn big_alloc(&mut self, size: usize) -> &mut JlValue {
+    fn big_alloc(&mut self, size: usize) -> &mut JlValue {
         // TODO: actually handle this rather than piggybacking on Rust
         self.rust_alloc(size)
     }
