@@ -138,6 +138,16 @@ pub struct GcPool {
     osize: usize                  // size of objects in this pool, could've been u16
 }
 
+impl GcPool {
+    pub fn new(size: usize) -> Self {
+        GcPool {
+            freelist: Vec::new(),
+            newpages: Vec::new(),
+            osize: size,
+        }
+    }
+}
+
 #[repr(C)]
 pub struct WeakRef {
     // JL_DATA_TYPE exists before the pointer
@@ -188,7 +198,7 @@ impl<'a> JlBinding<'a> {
 // lifetimes don't mean anything yet
 pub struct ThreadHeap<'a> {
     // pools
-    pools: [GcPool; GC_N_POOLS],
+    pools: Vec<GcPool>, // This has size GC_N_POOLS!
     // weak refs
     weak_refs: Vec<WeakRef>,
     // malloc'd arrays
@@ -203,12 +213,43 @@ pub struct ThreadHeap<'a> {
     
 }
 
+impl<'a> ThreadHeap<'a> {
+    pub fn new() -> Self {
+        let mut pools = Vec::with_capacity(GC_N_POOLS);
+        for size in GC_SIZE_CLASSES.iter() {
+            pools.push(GcPool::new(*size));
+        }
+        
+        ThreadHeap {
+            pools: pools,
+            weak_refs: Vec::new(),
+            mallocarrays: Vec::new(),
+            mafreelist: Vec::new(),
+            big_objects: VecDeque::new(),
+            rem_bindings: Vec::new(),
+            remset: Vec::new(),
+            last_remset: Vec::new(),
+        }
+    }
+}
+
 pub struct GcMarkCache {
     // thread-local statistics, will be merged into global during stop-the-world
     perm_scanned_bytes: usize,
     scanned_bytes: usize,
     nbig_obj: usize, // # of queued big objects to be moved to old gen.
     big_obj: [* mut libc::c_void; 1024],
+}
+
+impl GcMarkCache {
+    pub fn new() -> Self {
+        GcMarkCache {
+            perm_scanned_bytes: 0,
+            scanned_bytes: 0,
+            nbig_obj: 0,
+            big_obj: [::std::ptr::null_mut(); 1024],
+        }
+    }
 }
 
 pub struct GcFrame {
@@ -245,6 +286,22 @@ pub struct Gc2<'a> {
 }
 
 impl<'a> Gc2<'a> {
+    pub fn new(tls: &'static JlTLS, stack: &'static GcFrame, pg_mgr: &'a PageMgr) -> Self {
+        Gc2 {
+            heap: ThreadHeap::new(),
+            pg_mgr: pg_mgr,
+            cache: GcMarkCache::new(),
+            gc_stack: stack,
+            world_age: 0,
+            gc_state: GcState::Safe,
+            in_finalizer: false,
+            disable_gc: false,
+            finalizers: Vec::new(),
+            finalizers_inhibited: 0,
+            tls: tls
+        }
+    }
+    
     pub fn collect(&mut self, full: bool) {
     }
 

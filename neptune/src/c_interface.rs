@@ -23,7 +23,6 @@ pub type JlJmpBuf = libc::c_void; // we cannot use long jumps in Rust anyways
 pub type JlValue = libc::c_void;
 pub type JlTask = libc::c_void;
 pub type JlModule = libc::c_void;
-pub type GcFrame = libc::c_void;
 
 extern {
     pub fn gc_final_count_page(pg_cnt: usize);
@@ -327,4 +326,13 @@ pub extern fn neptune_pool_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize) -> 
 #[no_mangle]
 pub extern fn neptune_big_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize) -> &'gc mut JlValue {
     gc.big_alloc(size)
+}
+
+#[no_mangle]
+pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static JlTLS,
+                                               stack: &'static GcFrame) -> Box<Gc2<'a>> {
+    let pg_mgr = unsafe {
+        PAGE_MGR.as_mut().unwrap()
+    };
+    Box::new(Gc2::new(tls, stack, pg_mgr))
 }
