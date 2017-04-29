@@ -125,6 +125,8 @@ pub struct JlTLS {
     pub in_pure_callback: c_int,
     pub finalizers: Vec<Finalizer<'static>>,
     pub gc_cache: GcMarkCache,
+    // pointer to thread-local GC-related stuff, lifetime is meaningless!
+    pub tl_gcs: * mut Gc2<'static>,
 }
 
 type JlPTLS<'a> = Option<&'a JlTLS>; // this is just a pointer to thread-local state
