@@ -104,6 +104,7 @@ impl<'a> Region<'a> {
 #[repr(C)]
 pub struct PageMeta<'a> {
     pub pool_n:     u8,   // idx of pool that owns this page
+    // TODO: make following bools after transitioning to Rust
     pub has_marked: u8,   // whether any cell is marked in this page
     pub has_young:  u8,   // whether any live and young cells are in this page, before sweeping
     pub nold:       u16,  // #old objects
@@ -229,7 +230,8 @@ pub struct BigVal {
     //prev: Box<BigVal>,
     szOrAge: usize, // unpack this union via methods
     padding: [u8; 32], // to align to 64 bits
-    headerOrBits: usize // unpack this union via methods
+    headerOrBits: usize, // unpack this union via methods
+    // object data is here
 }
 
 impl BigVal {

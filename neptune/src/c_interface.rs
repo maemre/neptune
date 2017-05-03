@@ -24,6 +24,15 @@ pub type JlValue = libc::c_void;
 pub type JlTask = libc::c_void;
 pub type JlModule = libc::c_void;
 
+// this is actually just the tag
+pub struct JlTaggedValue {
+    pub header: libc::uintptr_t
+}
+// this is actually mem::size_of::<JlTaggedValue>(), we cannot make it a static const
+// because `size_of` is not yet constant in Rust unfortunately.
+// ACHTUNG: update this if JlTaggedValue is ever changed!
+pub const SIZE_OF_JLTAGGEDVALUE: usize = 8;
+
 extern {
     pub fn gc_final_count_page(pg_cnt: usize);
     pub fn jl_gc_wait_for_the_world(); // wait for the world to stop
@@ -33,6 +42,18 @@ extern {
 
     // set type of a value by setting the tag
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
+}
+
+pub fn jl_value_of(t: &JlTaggedValue) -> &JlValue {
+    unsafe {
+        mem::transmute((t as * const JlTaggedValue).offset(1))
+    }
+}
+
+pub fn jl_value_of_mut(t: &mut JlTaggedValue) -> &mut JlValue {
+    unsafe {
+        mem::transmute((t as * mut JlTaggedValue).offset(1))
+    }
 }
 
 pub fn gc_init<'a>(page_size: usize) -> Box<Gc<'a>> {
@@ -223,6 +244,8 @@ impl<'a> DerefMut for JlRegionArray<'a> {
 
 #[no_mangle]
 pub unsafe extern fn neptune_init_page_mgr() {
+    println!("page offset: {}", GC_PAGE_OFFSET);
+
     PAGE_MGR = Some(PageMgr::new());
     REGIONS = Some(Vec::with_capacity(REGION_COUNT));
     let regions = REGIONS.as_mut().unwrap();

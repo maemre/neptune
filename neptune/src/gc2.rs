@@ -2,19 +2,18 @@ use libc;
 use pages::*;
 use std::mem;
 use gc::*;
-use c_interface::JlValue;
 use c_interface::*;
 use bit_field::BitField;
 use alloc;
 use std::collections::VecDeque;
-
-// this is actually just the tag
-struct JlTaggedValue {
-    header: libc::uintptr_t
-}
+use std::intrinsics;
 
 const TAG_BITS: u8 = 2; // number of tag bits
 const GC_N_POOLS: usize = 41;
+const JL_SMALL_BYTE_ALIGNMENT: usize = 16;
+
+// offset for aligning data in page to 16 bytes (JL_SMALL_BYTE_ALIGNMENT) after tag.
+pub const GC_PAGE_OFFSET: usize = (JL_SMALL_BYTE_ALIGNMENT - (SIZE_OF_JLTAGGEDVALUE % JL_SMALL_BYTE_ALIGNMENT));
 
 static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
     // minimum platform alignment
@@ -23,7 +22,7 @@ static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
     16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256,
     // rest is from Julia, according to formula:
     // size = (div(2^14-8,rng)÷16)*16; hcat(sz, (2^14-8)÷sz, 2^14-(2^14-8)÷sz.*sz)'
-    
+
     // rng = 60:-4:32 (8 pools)
     272, 288, 304, 336, 368, 400, 448, 496,
     //   60,  56,  53,  48,  44,  40,  36,  33, /pool
@@ -69,7 +68,7 @@ const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(
  * and add the size of the header, to get the pointer to the value it stores
  */
 impl JlTaggedValue {
-    
+
     // implement union members by transmuting memory
     pub unsafe fn next(&self) -> * const JlTaggedValue {
         mem::transmute(self)
@@ -132,13 +131,13 @@ mod jltagged_value_tests {
 }
 
 // A GC Pool used for pooled allocation
-pub struct GcPool {
-    freelist: Vec<JlTaggedValue>, // list of free objects, a vec is more packed
+pub struct GcPool<'a> {
+    freelist: Vec<&'a mut JlTaggedValue>, // list of free objects, a vec is more packed
     newpages: Vec<JlTaggedValue>, // list of chunks of free objects
     osize: usize                  // size of objects in this pool, could've been u16
 }
 
-impl GcPool {
+impl<'a> GcPool<'a> {
     pub fn new(size: usize) -> Self {
         GcPool {
             freelist: Vec::new(),
@@ -198,19 +197,19 @@ impl<'a> JlBinding<'a> {
 // lifetimes don't mean anything yet
 pub struct ThreadHeap<'a> {
     // pools
-    pools: Vec<GcPool>, // This has size GC_N_POOLS!
+    pools: Vec<GcPool<'a>>, // This has size GC_N_POOLS!
     // weak refs
     weak_refs: Vec<WeakRef>,
     // malloc'd arrays
     mallocarrays: Vec<MallocArray>,
     mafreelist: Vec<MallocArray>,
     // big objects
-    big_objects: VecDeque<BigVal>,
+    big_objects: VecDeque<&'a BigVal>,
     // remset
     rem_bindings: Vec<JlBinding<'a>>,
     remset: Vec<* mut JlValue>,
     last_remset: Vec<* mut JlValue>,
-    
+
 }
 
 impl<'a> ThreadHeap<'a> {
@@ -219,7 +218,7 @@ impl<'a> ThreadHeap<'a> {
         for size in GC_SIZE_CLASSES.iter() {
             pools.push(GcPool::new(*size));
         }
-        
+
         ThreadHeap {
             pools: pools,
             weak_refs: Vec::new(),
@@ -265,7 +264,7 @@ pub struct Gc2<'a> {
     // heap for current thread
     heap: ThreadHeap<'a>,
     // handle for page manager
-    pg_mgr: &'a PageMgr,
+    pg_mgr: &'a mut PageMgr,
     // mark cache for thread-local marks
     cache: GcMarkCache,
     // Stack for GC roots
@@ -286,8 +285,8 @@ pub struct Gc2<'a> {
 }
 
 impl<'a> Gc2<'a> {
-    pub fn new(tls: &'static JlTLS, stack: &'static GcFrame, pg_mgr: &'a PageMgr) -> Self {
-        Gc2 {
+    pub fn new(tls: &'static JlTLS, stack: &'static GcFrame, pg_mgr: &'a mut PageMgr) -> Self {
+       Gc2 {
             heap: ThreadHeap::new(),
             pg_mgr: pg_mgr,
             cache: GcMarkCache::new(),
@@ -301,7 +300,7 @@ impl<'a> Gc2<'a> {
             tls: tls
         }
     }
-    
+
     pub fn collect(&mut self, full: bool) {
     }
 
@@ -309,12 +308,12 @@ impl<'a> Gc2<'a> {
     pub fn collect_small(&mut self) {
         self.collect(false)
     }
-    
+
     #[inline(always)]
     pub fn collect_full(&mut self) {
         self.collect(true)
     }
-    
+
     // allocate a Julia object
     // Semi-equivalent(?) to: julia/src/gc.c:jl_gc_alloc
     pub fn alloc(&mut self, size: usize, typ: * const libc::c_void) -> &mut JlValue {
@@ -335,60 +334,120 @@ impl<'a> Gc2<'a> {
 
     // Semi-equivalent(?) to: julia/src/gc.c:jl_gc_pool_alloc
     pub fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
-        match self.find_pool(&size) {
+        let osize = size - mem::size_of::<JlTaggedValue>();
+        let v = match self.find_pool(&osize) {
             Some(poolIndex) => {
-                let mut pool = &mut self.heap.pools[poolIndex];
                 // TODO: check if pool is full, see below...
                 // TODO: I'm not sure how to use pool.newpages yet...
-                match pool.freelist.pop() {
-                    Some(v) => {
-                        //unsafe { v.typ_mut() }
-                        panic!("Memory error: pool_alloc() unimplemented")
-                    },
-                    None => panic!("Memory error: no objects in pool free list")
+                //
+                // We are not using newpages and adding new pages to freelist for now.
+                // We can implement newpages as an optimization later on.
+                // TODO: do extra bookkeeping about marking pagemetas etc.
+                if let Some(v) = self.heap.pools[poolIndex].freelist.pop() {
+                    let pool = &self.heap.pools[poolIndex];
+                    let meta = unsafe {
+                        self.pg_mgr.find_pagemeta(v).unwrap()
+                    };
+                    // just a sanity check:
+                    debug_assert_eq!(meta.osize as usize, pool.osize);
+                    meta.has_young = 1; // TODO: make this field a bool
+
+                    if let Some(next) = pool.freelist.last() {
+                        unsafe { // this unsafe is here because `unlikely` is marked unsafe in Rust
+                            if intrinsics::unlikely(Page::of(v) != Page::of(next)) {
+                                meta.nfree = 0;
+                            }
+                        }
+                    }
+                    v
+                } else {
+                    self.add_page(poolIndex);
+                    self.heap.pools[poolIndex].freelist.pop().unwrap()
                 }
             },
             None => {
-                // If this happens, user should have called 'alloc'
-                // first, which will handle calling 'big_alloc' instead
-                // if necessary (i.e. no pools); just do it for them
-                self.big_alloc(size)
+                // size of the object is too large for any pool, should've used alloc
+                panic!(format!("Allocation error: object size {} is too large for pool", size));
             }
+        };
+        jl_value_of_mut(v)
+    }
+
+    fn add_page(&mut self, poolIndex: usize) {
+        // TODO: rewrite this after moving regions to page manager for safety
+        // allocate page
+        let regions = unsafe {
+            REGIONS.as_mut().unwrap()
+        };
+        let page = unsafe {
+            self.pg_mgr.alloc_page(regions)
+        };
+        let region = unsafe {
+            neptune_find_region(page).unwrap()
+        };
+        // get page meta
+        let i = region.index_of(page).unwrap();
+        let meta = &mut region.meta[i];
+        // set up page meta
+        let pool = &mut self.heap.pools[poolIndex];
+        meta.pool_n = poolIndex as u8;
+        meta.osize = pool.osize as u16;
+        meta.thread_n = self.tls.tid as u16;
+        meta.has_young = 1;
+        meta.has_marked = 1;
+        let size = mem::size_of::<JlTaggedValue>() + meta.osize as usize;
+        // size of the data portion of the page, after aligning to 16 bytes after each tag
+        let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;
+        // padding to align the object to Julia's required alignment
+        let padding = (size - JL_SMALL_BYTE_ALIGNMENT) % JL_SMALL_BYTE_ALIGNMENT;
+        meta.nfree = (aligned_pg_size / (size + padding) as usize) as u16;
+        // add objects to freelist
+        pool.freelist.reserve(meta.nfree as usize);
+        // println!("object size: {}, computed size: {}, # free objects: {}", meta.osize, size, meta.nfree);
+        for i in 0..(meta.nfree as usize) {
+            let v = unsafe {
+                mem::transmute(&mut page.data[i * (size + padding) + GC_PAGE_OFFSET])
+            };
+            pool.freelist.push(v);
         }
     }
 
     pub fn find_pool(&self, size: &usize) -> Option<usize> {
+        if *size > GC_MAX_SZCLASS {
+            return None;
+        }
         GC_SIZE_CLASSES.binary_search(size)
-            .map(|i| Some(i))
-            .unwrap_or_else(|idx| {
-                let i = idx + 1;
-                if i > GC_SIZE_CLASSES.len() {
+            .map(|i| {
+                Some(i)
+            })
+            .unwrap_or_else(|i| {
+                if i >= GC_SIZE_CLASSES.len() {
                     None
                 } else {
                     Some(i)
                 }
             })
     }
-    
+
     pub fn big_alloc(&mut self, size: usize) -> &mut JlValue {
-        // TODO: this is all wrong; I'm just trying to get it to compile
-        // TODO actually take into account 'size' in creating something of
-        //      that size.
-        let bv = BigVal::new(size, 0);
+        let allocsz = mem::size_of::<BigVal>().checked_add(size)
+            .expect(& format!("Cannot allocate a BigVal with size {} on this architecture", size));
+        let (bv, tv) = unsafe {
+            let ptr = self.rust_alloc::<BigVal>(allocsz);
+            let taggedvalue: &mut JlTaggedValue = mem::transmute(ptr.offset(1));
+            (&*ptr, taggedvalue)
+        };
         self.heap.big_objects.push_back(bv);
-        //self.heap.big_objects.back_mut().unwrap()
-        panic!("GC error: unimplemented 'big_alloc'")
+        jl_value_of_mut(tv)
     }
 
-    pub fn rust_alloc(&mut self, size: usize) -> &mut JlValue {
-        unsafe {
-            // we don't deal with ZSTs but just fail
-            debug_assert_ne!(size, 0);
-            let ptr = alloc::heap::allocate(size, 8);
-            if ptr.is_null() {
-                panic!("GC error: out of memory (OOM)!");
-            }
-            mem::transmute(ptr)
+    pub unsafe fn rust_alloc<T>(&mut self, size: usize) -> * mut T {
+        // we don't deal with ZSTs but just fail
+        debug_assert_ne!(size, 0);
+        let ptr = alloc::heap::allocate(size, 8);
+        if ptr.is_null() {
+            panic!("GC error: out of memory (OOM)!");
         }
+        mem::transmute(ptr)
     }
 }

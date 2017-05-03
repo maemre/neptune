@@ -593,10 +593,14 @@ void _julia_init(JL_IMAGE_SEARCH rel)
     }
 #endif
 
+    // ACHTUNG
+    // N.B. initialize global GC structures before initializing threads
+    jl_gc_init();
+
     jl_init_threading();
 
-    jl_gc_init();
     jl_gc_enable(0);
+
     jl_init_types();
     jl_init_frontend();
     jl_init_tasks();

@@ -289,6 +289,8 @@ static void ti_initthread(int16_t tid)
     ptls->bt_data = (uintptr_t*)bt_data;
     jl_mk_thread_heap(ptls);
     jl_install_thread_signal_handler(ptls);
+    // initialize thread-local GC structures
+    ptls->tl_gcs = neptune_init_thread_local_gc(ptls, ptls->pgcstack);
 
     jl_all_tls_states[tid] = ptls;
 }
