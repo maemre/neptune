@@ -84,10 +84,12 @@ impl JlTaggedValue {
     }
     // this is bits in Julia
     pub unsafe fn tag(&self) -> libc::uintptr_t {
+        // TODO might need to change based on LSB/MSB
         self.header.get_bits(0..TAG_BITS)
     }
     // this will panic if one tries to set bits higher than lowest TAG_BITS bits
     pub unsafe fn set_tag(&mut self, tag: u8) {
+        // TODO might need to change based on LSB/MSB
         self.header.set_bits(0..TAG_BITS, tag as usize);
     }
 }
@@ -133,15 +135,15 @@ mod jltagged_value_tests {
 // A GC Pool used for pooled allocation
 pub struct GcPool<'a> {
     freelist: Vec<&'a mut JlTaggedValue>, // list of free objects, a vec is more packed
-    newpages: Vec<JlTaggedValue>, // list of chunks of free objects
-    osize: usize                  // size of objects in this pool, could've been u16
+    newpages: Vec<JlTaggedValue>, // list of chunks of free objects (an optimization...)
+    osize: usize                  // size of each object in this pool, could've been u16
 }
 
 impl<'a> GcPool<'a> {
     pub fn new(size: usize) -> Self {
         GcPool {
             freelist: Vec::new(),
-            newpages: Vec::new(),
+            newpages: Vec::new(), // optimization, currently unused
             osize: size,
         }
     }
@@ -157,7 +159,7 @@ pub struct WeakRef {
 type JlSym = libc::c_void;
 
 #[repr(C)]
-pub struct JlBinding<'a> {
+pub struct JlBinding<'a> { // Currently unused (easier to know size at certain moments)
     pub name: * mut JlSym,
     pub value: &'a JlValue,
     pub globalref: &'a JlValue,
@@ -197,7 +199,7 @@ impl<'a> JlBinding<'a> {
 // lifetimes don't mean anything yet
 pub struct ThreadHeap<'a> {
     // pools
-    pools: Vec<GcPool<'a>>, // This has size GC_N_POOLS!
+    pools: Vec<GcPool<'a>>, // This has size GC_N_POOLS!, could have been an array, but copy only implemented for simpler things, so use a vec
     // weak refs
     weak_refs: Vec<WeakRef>,
     // malloc'd arrays
@@ -209,7 +211,6 @@ pub struct ThreadHeap<'a> {
     rem_bindings: Vec<JlBinding<'a>>,
     remset: Vec<* mut JlValue>,
     last_remset: Vec<* mut JlValue>,
-
 }
 
 impl<'a> ThreadHeap<'a> {
@@ -251,6 +252,7 @@ impl GcMarkCache {
     }
 }
 
+// Possibly doing in C instead
 pub struct GcFrame {
     nroots: usize,
     // GC never deallocates frames, their lifetime is 'static from Rust's point of view
@@ -271,7 +273,7 @@ pub struct Gc2<'a> {
     gc_stack: &'static GcFrame,
     // Age of the world, used for promotion
     world_age: usize,
-    // State of GC for this thread
+    // State of GC for this thread; TODO possibly move some back (not using most)
     gc_state: GcState,
     in_finalizer: bool,
     disable_gc: bool,
@@ -336,15 +338,15 @@ impl<'a> Gc2<'a> {
     pub fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
         let osize = size - mem::size_of::<JlTaggedValue>();
         let v = match self.find_pool(&osize) {
-            Some(poolIndex) => {
+            Some(pool_index) => {
                 // TODO: check if pool is full, see below...
                 // TODO: I'm not sure how to use pool.newpages yet...
                 //
                 // We are not using newpages and adding new pages to freelist for now.
                 // We can implement newpages as an optimization later on.
                 // TODO: do extra bookkeeping about marking pagemetas etc.
-                if let Some(v) = self.heap.pools[poolIndex].freelist.pop() {
-                    let pool = &self.heap.pools[poolIndex];
+                if let Some(v) = self.heap.pools[pool_index].freelist.pop() {
+                    let pool = &self.heap.pools[pool_index];
                     let meta = unsafe {
                         self.pg_mgr.find_pagemeta(v).unwrap()
                     };
@@ -361,8 +363,8 @@ impl<'a> Gc2<'a> {
                     }
                     v
                 } else {
-                    self.add_page(poolIndex);
-                    self.heap.pools[poolIndex].freelist.pop().unwrap()
+                    self.add_page(pool_index);
+                    self.heap.pools[pool_index].freelist.pop().unwrap()
                 }
             },
             None => {
@@ -379,9 +381,7 @@ impl<'a> Gc2<'a> {
         let regions = unsafe {
             REGIONS.as_mut().unwrap()
         };
-        let page = unsafe {
-            self.pg_mgr.alloc_page(regions)
-        };
+        let page = self.pg_mgr.alloc_page(regions);
         let region = unsafe {
             neptune_find_region(page).unwrap()
         };
@@ -394,7 +394,7 @@ impl<'a> Gc2<'a> {
         meta.osize = pool.osize as u16;
         meta.thread_n = self.tls.tid as u16;
         meta.has_young = 1;
-        meta.has_marked = 1;
+        meta.has_marked = 1; // TODO check
         let size = mem::size_of::<JlTaggedValue>() + meta.osize as usize;
         // size of the data portion of the page, after aligning to 16 bytes after each tag
         let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;

@@ -1,0 +1,8 @@
+#+title: Notes on the design of Neptune, our Rust GC
+#+author: Mehmet Emre and Michael Christensen
+#+options: html-postamble:nil
+
+* First GC implementation
+  1. ∀ threads, traverse remset
+  2. ∀ threads, mark
+  3. ∀ pages, sweep

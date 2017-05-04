@@ -331,7 +331,7 @@ impl PageMgr {
 #[cfg(test)]
 mod pages_tests {
     use super::*;
-    
+
     #[test]
     fn test_clone() {
         let arr = [42; PAGE_SZ];

@@ -13,11 +13,10 @@
 * A simple GC
 Write a simple GC in Rust to see it work
 
-- [0/4] Implementation
-  - [ ] Remove most of the code used internally in current GC 
-  - [ ] Write a simple allocator with no collection, piggybacking on Rust's
-      memory allocator.
-  - [ ] Write stubs for GC debug routines.
+- [0/3] Implementation
+  - [x] Remove most of the code used internally in current GC 
+  - [x] Write a simple allocator with no collection, piggybacking on Rust's
+        memory allocator.
   - [ ] Write a simple mark and sweep garbage collector.
 - [0/3] Testing
   - [ ] Write some unit tests on Rust side to check liveness.

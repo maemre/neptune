@@ -91,7 +91,7 @@ impl<'a> Region<'a> {
         // None
         // optimization of above with pointer arithmetic:
         let offset = data as usize - self.pages.as_ptr() as usize;
-        if offset < 0 || offset >= self.pg_cnt as usize * PAGE_SZ {
+        if offset >= self.pg_cnt as usize * PAGE_SZ {
             // data is not in the region
             None
         } else {
@@ -159,7 +159,7 @@ pub struct Gc<'a> {
 impl<'a> Gc<'a> {
     pub fn new(page_size: usize) -> Gc<'a> {
         let mut regions = Vec::with_capacity(REGION_COUNT);
-        for i in 0..REGION_COUNT {
+        for _ in 0..REGION_COUNT {
             regions.push(Region::new());
         }
         Gc {
@@ -187,9 +187,9 @@ impl<'a> Gc<'a> {
         // make sure that this is atomic by checking need_sync
         for i in 1..list.len() {
             let v = list[i].obj;
-            let mut shouldMove = false;
+            let mut should_move = false;
             if o.map(|n| n as *const JlValue as usize) == (v.as_ref().map(|n| (n as *const &JlValue as usize).clear_tag(1))) {
-                shouldMove = true;
+                should_move = true;
                 let f = list[i].fun;
                 // function is an actual function, cast the pointer
                 if v.as_ref().map(|n| (n as *const &JlValue as usize) & 1).unwrap_or(0) != 0 {
@@ -198,9 +198,9 @@ impl<'a> Gc<'a> {
                     f(o);
                 } else {
                     copied_list.push(Finalizer::new(o, f));
-                }                
+                }
             }
-            if shouldMove || v.is_none() {
+            if should_move || v.is_none() {
                 // TODO: make sure that these updates are atomic by enforcing rules on vecs if need_sync
                 list.swap_remove(i);
             }
