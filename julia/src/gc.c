@@ -1959,6 +1959,8 @@ JL_DLLEXPORT void jl_gc_collect(int full)
     // no-op for non-threading
     jl_gc_wait_for_the_world();
 
+    // TODO: Here would be a good place to call our Rust garbage collection code,
+    //       now that the threads have all stopped and reached a safe point
     if (!jl_gc_disable_counter) {
         JL_LOCK_NOGC(&finalizers_lock);
         if (_jl_gc_collect(ptls, full)) {

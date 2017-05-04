@@ -31,10 +31,10 @@ Write a simple GC in Rust to see it work
 Improve the allocator rather than relying on Rust's. *Test with testing
 procedures above after each step*.
 
-- [ ] Use ~alloc::heap~ to write a page manager.
-- [ ] Switch to page manager for memory allocation.
-- [ ] Switch to a region-based page manager.
-- [ ] Switch to ~mmap~ and memory commit/de-commit for a more efficient and
+- [x] Use ~alloc::heap~ to write a page manager.
+- [x] Switch to page manager for memory allocation.
+- [x] Switch to a region-based page manager.
+- [x] Switch to ~mmap~ and memory commit/de-commit for a more efficient and
       happier relationship with the OS. This part requires writing custom code for
       Windows if we plan to support it.
 
@@ -51,6 +51,11 @@ Make GC incremental on a single thread to find some of the bugs early.
 - [ ] Read concurrent GC papers.
 - [ ] Design a concurrent /or/ parallel GC.
 - [ ] TBD.
+
+* Parallel GC
+- [ ] Use a thread pool
+- [ ] Distribute work among threads
+- [ ] Add testing
 
 * Benchmarking
 TBD.
