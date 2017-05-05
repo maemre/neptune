@@ -457,18 +457,18 @@ impl<'a> Gc2<'a> {
     }
 
     pub fn collect(&mut self, full: bool) -> bool {
-      // julia's gc.c does the following:
-      // 1. fix GC bits of objects in the memset
-      // 2.1 mark every object in the last_remsets and rem_binding
-      // 2.2 mark every thread local root
-      // 3. walk roots
-      // 4. check object to finalize
-      // 5. sweep (if quick sweek, put remembered objects in queued state)
-      for t in jl_all_ts_states.iter() {
-        self.mark_remset(t);
-        self.mark_thread_local(t);
-      }
-      true
+        // julia's gc.c does the following:
+        // 1. fix GC bits of objects in the memset
+        // 2.1 mark every object in the last_remsets and rem_binding
+        // 2.2 mark every thread local root
+        // 3. walk roots
+        // 4. check object to finalize
+        // 5. sweep (if quick sweep, put remembered objects in queued state)
+        for t in jl_all_tls_states.iter() {
+            self.mark_remset(t);
+            self.mark_thread_local(t);
+        }
+        false
     }
 
     fn mark_remset(&mut self, ptls: &*mut JlTLS) {

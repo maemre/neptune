@@ -1933,6 +1933,12 @@ static int _jl_gc_collect(jl_ptls_t ptls, int full)
     return recollect;
 }
 
+#ifdef NEPTUNE
+#define GC_COLLECT(ptls, full) _jl_gc_collect(ptls, full)
+#else
+#define GC_COLLECT(ptls, full) neptune_gc_collect(ptls, full)
+#endif
+
 JL_DLLEXPORT void jl_gc_collect(int full)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
@@ -1963,14 +1969,10 @@ JL_DLLEXPORT void jl_gc_collect(int full)
     //       now that the threads have all stopped and reached a safe point
     if (!jl_gc_disable_counter) {
         JL_LOCK_NOGC(&finalizers_lock);
-#if 1
-        if (neptune_gc_collect(ptls, full)) {
-#else
-        if (_jl_gc_collect(ptls, full)) {
-#endif
+        if (GC_COLLECT(ptls, full)) {
           // TODO: determine what to needs to change in the rest of this block
             jl_gc_mark_ptrfree(ptls);
-            int ret = _jl_gc_collect(ptls, 0);
+            int ret = GC_COLLECT(ptls, 0);
             (void)ret;
             assert(!ret);
         }

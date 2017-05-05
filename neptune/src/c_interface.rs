@@ -47,7 +47,7 @@ extern {
     //pub static jl_all_ts_states: *mut JlTLS;
     //pub static jl_n_threads: u32;
     // TODO I'm not sure if this is legal, but it compiles for now
-    pub static jl_all_ts_states: Vec<* mut JlTLS>;
+    pub static jl_all_tls_states: Vec<* mut JlTLS>;
 }
 
 pub fn jl_value_of(t: &JlTaggedValue) -> &JlValue {
