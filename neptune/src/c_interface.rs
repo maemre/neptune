@@ -42,6 +42,12 @@ extern {
 
     // set type of a value by setting the tag
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
+
+    // list of global threads, declared in julia/src/threading.c
+    //pub static jl_all_ts_states: *mut JlTLS;
+    //pub static jl_n_threads: u32;
+    // TODO I'm not sure if this is legal, but it compiles for now
+    pub static jl_all_ts_states: Vec<* mut JlTLS>;
 }
 
 pub fn jl_value_of(t: &JlTaggedValue) -> &JlValue {
@@ -364,9 +370,6 @@ pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static JlTLS,
 
 // Corresponds to _jl_gc_collect
 #[no_mangle]
-pub extern fn neptune_gc_collect<'a>(
-  tls: &'static JlTLS, full: bool) -> bool {
-    // Pass into tls to as argument in case we need it...?
-    let gc: &'a mut Gc2 = tls.tl_gcs;
+pub extern fn neptune_gc_collect<'gc, 'a>(gc: &'gc mut Gc2<'a>, full: bool) -> bool {
     gc.collect(full)
 }

@@ -92,6 +92,14 @@ impl JlTaggedValue {
         // TODO might need to change based on LSB/MSB
         self.header.set_bits(0..TAG_BITS, tag as usize);
     }
+
+    pub unsafe fn markbit(&self) -> libc::uintptr_t {
+      self.header.get_bits(0..TAG_BITS) // TODO change, just for compiling right now
+    }
+
+    pub unsafe fn set_markbit(&mut self, markbit: u8) {
+
+    }
 }
 
 #[cfg(test)]
@@ -456,10 +464,26 @@ impl<'a> Gc2<'a> {
       // 3. walk roots
       // 4. check object to finalize
       // 5. sweep (if quick sweek, put remembered objects in queued state)
+      for t in jl_all_ts_states.iter() {
+        self.mark_remset(t);
+        self.mark_thread_local(t);
+      }
       true
     }
 
-/*
+    fn mark_remset(&mut self, ptls: &*mut JlTLS) {
+
+    }
+
+    fn mark_thread_local(&mut self, ptls: &*mut JlTLS) {
+
+    }
+
+    fn get_frames() {
+
+    }
+
+    /*
     pub fn mark<>
     */
 

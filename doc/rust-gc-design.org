@@ -6,7 +6,8 @@
   1. ∀ threads, get roots & mark
     a. create a get_frames() function
     b. create functions: get/set_markbit for the tagged values
-    c. need to also expose C-side global thread list
+    c. need to also expose C-side global thread list 
+      -- This is in threading.c, "jl_ptls_t *jl_all_tls_states"
   2. ∀ objects in finalizer list, call finalizers
   3. ∀ regions. ∀ pages. sweep
   4. ∀ threads. ∀ big objects. sweep
