@@ -361,3 +361,12 @@ pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static JlTLS,
     };
     Box::new(Gc2::new(tls, stack, pg_mgr))
 }
+
+// Corresponds to _jl_gc_collect
+#[no_mangle]
+pub extern fn neptune_gc_collect<'a>(
+  tls: &'static JlTLS, full: bool) -> bool {
+    // Pass into tls to as argument in case we need it...?
+    let gc: &'a mut Gc2 = tls.tl_gcs;
+    gc.collect(full)
+}

@@ -1963,7 +1963,12 @@ JL_DLLEXPORT void jl_gc_collect(int full)
     //       now that the threads have all stopped and reached a safe point
     if (!jl_gc_disable_counter) {
         JL_LOCK_NOGC(&finalizers_lock);
+#if 1
+        if (neptune_gc_collect(ptls, full)) {
+#else
         if (_jl_gc_collect(ptls, full)) {
+#endif
+          // TODO: determine what to needs to change in the rest of this block
             jl_gc_mark_ptrfree(ptls);
             int ret = _jl_gc_collect(ptls, 0);
             (void)ret;

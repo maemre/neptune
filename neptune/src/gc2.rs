@@ -303,16 +303,13 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    pub fn collect(&mut self, full: bool) {
-    }
-
     #[inline(always)]
-    pub fn collect_small(&mut self) {
+    pub fn collect_small(&mut self) -> bool {
         self.collect(false)
     }
 
     #[inline(always)]
-    pub fn collect_full(&mut self) {
+    pub fn collect_full(&mut self) -> bool {
         self.collect(true)
     }
 
@@ -450,4 +447,20 @@ impl<'a> Gc2<'a> {
         }
         mem::transmute(ptr)
     }
+
+    pub fn collect(&mut self, full: bool) -> bool {
+      // julia's gc.c does the following:
+      // 1. fix GC bits of objects in the memset
+      // 2.1 mark every object in the last_remsets and rem_binding
+      // 2.2 mark every thread local root
+      // 3. walk roots
+      // 4. check object to finalize
+      // 5. sweep (if quick sweek, put remembered objects in queued state)
+      true
+    }
+
+/*
+    pub fn mark<>
+    */
+
 }
