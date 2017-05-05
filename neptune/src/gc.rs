@@ -238,6 +238,16 @@ impl BigVal {
     pub fn new(s: usize, h: usize) -> Self {
         BigVal { szOrAge: s, padding: [0; 32], headerOrBits: h }
     }
+
+    pub unsafe fn taggedvalue(&self) -> &JlTaggedValue {
+        let ptr: * const Self = self;
+        mem::transmute(ptr.offset(1))
+    }
+    
+    pub unsafe fn mut_taggedvalue(&mut self) -> &mut JlTaggedValue {
+        let ptr: * mut Self = self;
+        mem::transmute(ptr.offset(1))
+    }
 }
 
 // list of malloc'd arrays

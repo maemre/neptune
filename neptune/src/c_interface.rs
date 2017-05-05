@@ -48,6 +48,8 @@ extern {
     //pub static jl_n_threads: u32;
     // TODO I'm not sure if this is legal, but it compiles for now
     pub static jl_all_tls_states: Vec<* mut JlTLS>;
+
+    pub static jl_page_size: usize;
 }
 
 pub fn jl_value_of(t: &JlTaggedValue) -> &JlValue {
@@ -267,8 +269,8 @@ pub unsafe extern fn neptune_alloc_page<'a>() -> * mut u8 {
 }
 
 #[no_mangle]
-pub unsafe extern fn neptune_free_page<'a>(page_size: usize, data: * const u8) {
-    PAGE_MGR.as_mut().unwrap().free_page(REGIONS.as_mut().unwrap().as_mut_slice(), page_size, data);
+pub unsafe extern fn neptune_free_page<'a>(data: * const u8) {
+    PAGE_MGR.as_mut().unwrap().free_page(REGIONS.as_mut().unwrap().as_mut_slice(), data);
 }
 
 //------------------------------------------------------------------------------

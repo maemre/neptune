@@ -54,7 +54,7 @@ impl Clone for Page {
 
 pub struct PageMgr {
     region_pg_count: usize,
-    current_pg_count: usize,
+    pub current_pg_count: usize,
 }
 impl PageMgr {
     pub fn new() -> PageMgr {
@@ -244,8 +244,10 @@ impl PageMgr {
         }
     }
 
+    // TODO: implement free_page with a direct page and region index.
+    
     // free page with given pointer
-    pub fn free_page(&mut self, regions: &mut [Region], page_size: usize, p: * const u8) {
+    pub fn free_page(&mut self, regions: &mut [Region], p: * const u8) {
         let mut pg_idx = None;
         let mut reg_idx = None;
         for (i, region) in regions.iter_mut().enumerate() {
@@ -277,13 +279,13 @@ impl PageMgr {
         let mut decommit_size = PAGE_SZ;
         let mut page_ptr: Option<*const libc::c_void> = None;
         let mut should_decommit = true;
-        if PAGE_SZ < page_size {
-            let n_pages = (PAGE_SZ + page_size - 1) / PAGE_SZ; // size of OS pages in terms of our pages
-            decommit_size = page_size;
+        if PAGE_SZ < jl_page_size {
+            let n_pages = (PAGE_SZ + jl_page_size - 1) / PAGE_SZ; // size of OS pages in terms of our pages
+            decommit_size = jl_page_size;
 
             // hacky pointer magic for figuring out OS page alignment
             let page_ptr = unsafe {
-                Some(((&region.pages[pg_idx].data as *const u8 as usize) & !(page_size - 1)) as *const libc::c_void);
+                Some(((&region.pages[pg_idx].data as *const u8 as usize) & !(jl_page_size - 1)) as *const libc::c_void);
             };
 
             pg_idx = region.index_of_raw(p).unwrap();
