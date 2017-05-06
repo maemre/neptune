@@ -243,8 +243,6 @@ impl PageMgr {
             panic!("GC: out of memory: no regions left!"); // TODO: change with jl_throw
         }
     }
-
-    // TODO: implement free_page with a direct page and region index.
     
     // free page with given pointer
     pub fn free_page(&mut self, regions: &mut [Region], p: * const u8) {
@@ -263,13 +261,15 @@ impl PageMgr {
 
         let mut pg_idx = pg_idx.unwrap();
         let i = reg_idx.unwrap();
+
+        self.free_page_in_region(&mut regions[i], pg_idx);
+    }
+
+    // free page with given index at given region
+    pub fn free_page_in_region(&mut self, region: &mut Region, pg_idx: usize) {
         let bit_idx = (pg_idx % 32) as u8;
-        let region = &mut regions[i];
-
         assert!(region.allocmap[pg_idx / 32].get_bit(bit_idx), "GC: Memory corruption: allocation map and data mismatch!");
-
         region.allocmap[pg_idx / 32].set_bit(bit_idx, false);
-
         // free age data
         region.meta[pg_idx].ages = None;
 
@@ -285,10 +285,10 @@ impl PageMgr {
 
             // hacky pointer magic for figuring out OS page alignment
             let page_ptr = unsafe {
-                Some(((&region.pages[pg_idx].data as *const u8 as usize) & !(jl_page_size - 1)) as *const libc::c_void);
+                Some(((&region.pages[pg_idx].data as *const u8 as usize) & !(jl_page_size - 1)) as *const u8)
             };
 
-            pg_idx = region.index_of_raw(p).unwrap();
+            let pg_idx = region.index_of_raw(page_ptr.unwrap()).unwrap();
             if pg_idx + n_pages > region.pg_cnt as usize {
                 should_decommit = false;
             } else {
