@@ -54,7 +54,7 @@ impl Clone for Page {
 
 pub struct PageMgr {
     region_pg_count: usize,
-    current_pg_count: usize,
+    pub current_pg_count: usize,
 }
 impl PageMgr {
     pub fn new() -> PageMgr {
@@ -243,9 +243,9 @@ impl PageMgr {
             panic!("GC: out of memory: no regions left!"); // TODO: change with jl_throw
         }
     }
-
+    
     // free page with given pointer
-    pub fn free_page(&mut self, regions: &mut [Region], page_size: usize, p: * const u8) {
+    pub fn free_page(&mut self, regions: &mut [Region], p: * const u8) {
         let mut pg_idx = None;
         let mut reg_idx = None;
         for (i, region) in regions.iter_mut().enumerate() {
@@ -261,13 +261,15 @@ impl PageMgr {
 
         let mut pg_idx = pg_idx.unwrap();
         let i = reg_idx.unwrap();
+
+        self.free_page_in_region(&mut regions[i], pg_idx);
+    }
+
+    // free page with given index at given region
+    pub fn free_page_in_region(&mut self, region: &mut Region, pg_idx: usize) {
         let bit_idx = (pg_idx % 32) as u8;
-        let region = &mut regions[i];
-
         assert!(region.allocmap[pg_idx / 32].get_bit(bit_idx), "GC: Memory corruption: allocation map and data mismatch!");
-
         region.allocmap[pg_idx / 32].set_bit(bit_idx, false);
-
         // free age data
         region.meta[pg_idx].ages = None;
 
@@ -277,16 +279,16 @@ impl PageMgr {
         let mut decommit_size = PAGE_SZ;
         let mut page_ptr: Option<*const libc::c_void> = None;
         let mut should_decommit = true;
-        if PAGE_SZ < page_size {
-            let n_pages = (PAGE_SZ + page_size - 1) / PAGE_SZ; // size of OS pages in terms of our pages
-            decommit_size = page_size;
+        if PAGE_SZ < jl_page_size {
+            let n_pages = (PAGE_SZ + jl_page_size - 1) / PAGE_SZ; // size of OS pages in terms of our pages
+            decommit_size = jl_page_size;
 
             // hacky pointer magic for figuring out OS page alignment
             let page_ptr = unsafe {
-                Some(((&region.pages[pg_idx].data as *const u8 as usize) & !(page_size - 1)) as *const libc::c_void);
+                Some(((&region.pages[pg_idx].data as *const u8 as usize) & !(jl_page_size - 1)) as *const u8)
             };
 
-            pg_idx = region.index_of_raw(p).unwrap();
+            let pg_idx = region.index_of_raw(page_ptr.unwrap()).unwrap();
             if pg_idx + n_pages > region.pg_cnt as usize {
                 should_decommit = false;
             } else {

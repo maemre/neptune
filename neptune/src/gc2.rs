@@ -5,7 +5,6 @@ use gc::*;
 use c_interface::*;
 use bit_field::BitField;
 use alloc;
-use std::collections::VecDeque;
 use std::intrinsics;
 
 const TAG_BITS: u8 = 2; // number of tag bits
@@ -218,7 +217,7 @@ pub struct ThreadHeap<'a> {
     mallocarrays: Vec<MallocArray>,
     mafreelist: Vec<MallocArray>,
     // big objects
-    big_objects: VecDeque<&'a BigVal>,
+    big_objects: Vec<&'a mut BigVal>,
     // remset
     rem_bindings: Vec<JlBinding<'a>>,
     remset: Vec<* mut JlValue>,
@@ -237,7 +236,7 @@ impl<'a> ThreadHeap<'a> {
             weak_refs: Vec::new(),
             mallocarrays: Vec::new(),
             mafreelist: Vec::new(),
-            big_objects: VecDeque::new(),
+            big_objects: Vec::new(),
             rem_bindings: Vec::new(),
             remset: Vec::new(),
             last_remset: Vec::new(),
@@ -443,10 +442,11 @@ impl<'a> Gc2<'a> {
             .expect(& format!("Cannot allocate a BigVal with size {} on this architecture", size));
         let (bv, tv) = unsafe {
             let ptr = self.rust_alloc::<BigVal>(allocsz);
-            let taggedvalue: &mut JlTaggedValue = mem::transmute(ptr.offset(1));
-            (&*ptr, taggedvalue)
+            (*ptr).set_size(size);
+            let taggedvalue: &mut JlTaggedValue = (*ptr).mut_taggedvalue();
+            (&mut *ptr, taggedvalue)
         };
-        self.heap.big_objects.push_back(bv);
+        self.heap.big_objects.push(bv);
         jl_value_of_mut(tv)
     }
 
@@ -458,6 +458,11 @@ impl<'a> Gc2<'a> {
             panic!("GC error: out of memory (OOM)!");
         }
         mem::transmute(ptr)
+    }
+
+    // free an unmanaged pointer
+    pub unsafe fn rust_free<T>(&mut self, ptr: * mut T, size: usize) {
+        alloc::heap::deallocate(mem::transmute::<* mut T, * mut u8>(ptr), size, 8);
     }
 
     pub fn collect(&mut self, full: bool) -> bool {
@@ -525,4 +530,122 @@ impl<'a> Gc2<'a> {
     pub fn mark<>
     */
 
+    fn sweep_pools(&mut self, full: bool) {
+                // TODO: reset freelists before sweep
+        // TODO: get this from page manager
+        let regions = unsafe { REGIONS.as_mut().unwrap() };
+        let mut remaining_pages = self.pg_mgr.current_pg_count;
+        'finish: for region in regions {
+            // if #pages in region is not a multiple of 32, then we need to check one more
+            // entry in allocmap
+            let check_incomplete_chunk = (region.pg_cnt % 32 == 0) as usize;
+            for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
+                let mut m = region.allocmap[i];
+                let mut j = 0;
+                while m != 0 {
+                    let pg_idx = 32 * i + j;
+                    // if current page is not allocated, skip
+                    if m | 1 == 0 {
+                        m >>= 1;
+                        j += 1;
+                        continue;
+                    }
+                    // whether current page should be freed completely
+                    let mut should_free = false;
+                    // if current page is to be swept
+                    // a page is to be swept if it contains young objects or we are
+                    // doing a full sweep
+                    // TODO: change has_young to bool
+                    if full || region.meta[pg_idx].has_young != 0 {
+                        let meta = &region.meta[pg_idx];
+                        let size = mem::size_of::<JlTaggedValue>() + meta.osize as usize;
+                        let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;
+                        let padding = (size - JL_SMALL_BYTE_ALIGNMENT) % JL_SMALL_BYTE_ALIGNMENT;
+                        let n_obj = aligned_pg_size / (size + padding) as usize;
+                        let page = &mut region.pages[pg_idx];
+                        let mut nfree = 0;
+                        for o_idx in 0..n_obj {
+                            let o = unsafe {
+                                mem::transmute::<&u8, &JlTaggedValue>(&page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
+                            };
+                            if unsafe { o.markbit() } == 0 { // TODO: make markbit a bool
+                                nfree += 1;
+                            }
+                        }
+                        if nfree != n_obj {
+                            // there are live objects in the page, return free objects to the corresponding free list
+                            let tl_gc: &mut Gc2 = unsafe {
+                                &mut *(&*jl_all_tls_states[meta.thread_n as usize]).tl_gcs
+                            };
+                            let freelist = &mut tl_gc.heap.pools[meta.pool_n as usize].freelist;
+                            for o_idx in 0..n_obj {
+                                let o = unsafe {
+                                    mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
+                                };
+                                freelist.push(o);
+                            }
+                        } else {
+                            // page doesn't have anything alive in it, mark it for freeing
+                            should_free = true;
+                        }
+                    }
+                    // we free the page here to make borrow checker happy
+                    if should_free {
+                        // page is unused, free it. we are being a little bit more aggressive here
+                        // we need to tell Rust that moving regions here is safe somehow.
+                        self.pg_mgr.free_page_in_region(region, pg_idx);
+                    }
+                    remaining_pages -= 1;
+                    if remaining_pages == 0 {
+                        break 'finish;
+                    }
+                    m >>= 1;
+                    j += 1;
+                }
+            }
+        }
+    }
+
+    // sweep bigvals in all threads
+    fn sweep_bigvals(&mut self, full: bool) {
+        for ptls in jl_all_tls_states.iter() {
+            // get thread-local Gc
+            let tl_gc = unsafe {
+                &mut * (**ptls).tl_gcs
+            };
+            tl_gc.sweep_local_bigvals(full);
+        }
+    }
+
+    // sweep bigvals local to this thread
+    fn sweep_local_bigvals(&mut self, full: bool) {
+        let mut nbig_obj = self.heap.big_objects.len();
+        let mut i = 0;
+        while i < nbig_obj {
+            if unsafe { self.heap.big_objects[i].taggedvalue().markbit() } == 0 {
+                let b = self.heap.big_objects.swap_remove(i);
+                nbig_obj -= 1;
+                // TODO: fix this by adding some info to BigVals
+                // currently there might be double frees, one from Rust, one from us!
+                unsafe {
+                    self.rust_free(b as * mut BigVal, b.size() + mem::size_of::<BigVal>());
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn sweep_weakrefs(&mut self, full: bool) {
+    }
+
+    // sweep the memory page by page.
+    //
+    // N.B. in this code, a "chunk" refers to 32 contiguous pages that
+    // correspond to an element of allocmap.
+    fn sweep(&mut self, full: bool) {
+        self.sweep_pools(full);
+        self.sweep_bigvals(full);
+        self.sweep_weakrefs(full);
+    }
 }

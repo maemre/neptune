@@ -32,7 +32,7 @@ void *jl_gc_alloc_page(void)
 
 void jl_gc_free_page(void *p)
 {
-  neptune_free_page(jl_page_size, p);
+  neptune_free_page(p);
 }
 
 #ifdef __cplusplus

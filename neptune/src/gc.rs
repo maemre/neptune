@@ -3,6 +3,7 @@ use bit_field::BitField;
 use pages::*;
 use util::*;
 use std::mem;
+use c_interface::*;
 
 // max. # of regions
 pub const REGION_COUNT: usize = 32768; // 2^48 / 8G
@@ -237,6 +238,26 @@ pub struct BigVal {
 impl BigVal {
     pub fn new(s: usize, h: usize) -> Self {
         BigVal { szOrAge: s, padding: [0; 32], headerOrBits: h }
+    }
+
+    pub unsafe fn taggedvalue(&self) -> &JlTaggedValue {
+        let ptr: * const Self = self;
+        mem::transmute(ptr.offset(1))
+    }
+
+    pub unsafe fn mut_taggedvalue(&mut self) -> &mut JlTaggedValue {
+        let ptr: * mut Self = self;
+        mem::transmute(ptr.offset(1))
+    }
+
+    #[inline(always)]
+    pub fn size(&self) -> usize {
+        self.szOrAge
+    }
+
+    #[inline(always)]
+    pub fn set_size(&mut self, size: usize) {
+        self.szOrAge = size;
     }
 }
 
