@@ -24,6 +24,12 @@ pub type JlValue = libc::c_void;
 pub type JlTask = libc::c_void;
 pub type JlModule = libc::c_void;
 
+pub enum DataType {
+  JL_WEAKREF_T,
+  JL_DATATYPE_T,
+  JL_UNIONTYPE_T,
+}
+
 // this is actually just the tag
 pub struct JlTaggedValue {
     pub header: libc::uintptr_t

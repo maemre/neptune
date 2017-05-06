@@ -69,6 +69,10 @@ const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(
  */
 impl JlTaggedValue {
 
+    pub unsafe fn as_tagged_value(vl: &*mut JlValue) -> * mut JlTaggedValue {
+      mem::transmute(vl) // TODO fix (subtract some pointer?) based on the offsets we're using; just for compiling right now
+    }
+
     // implement union members by transmuting memory
     pub unsafe fn next(&self) -> * const JlTaggedValue {
         mem::transmute(self)
@@ -465,14 +469,48 @@ impl<'a> Gc2<'a> {
         // 4. check object to finalize
         // 5. sweep (if quick sweep, put remembered objects in queued state)
         for t in jl_all_tls_states.iter() {
+            self.premark(t);
             self.mark_remset(t);
             self.mark_thread_local(t);
         }
         false
     }
 
-    fn mark_remset(&mut self, ptls: &*mut JlTLS) {
+    fn premark(&mut self, ptls: &*mut JlTLS) {
+      mem::swap(&mut self.heap.remset, &mut self.heap.last_remset);
+      //self.heap.remset.len = 0;
+      //self.heap.remset_nptr = 0;
+      // TODO
+    }
 
+    fn mark_remset(&self, ptls: &*mut JlTLS) {
+      for item in &self.heap.last_remset {
+        self.scan_obj(ptls, item, 0,
+          unsafe { (*<JlTaggedValue>::as_tagged_value(item as &*mut JlValue)).header } );
+      }
+    }
+
+    // TODO may need self to be mutable, meaning need to make
+    // callers use mutable reference too, etc.
+    fn scan_obj(&self, ptls: &*mut JlTLS,
+                v: &*mut JlValue, d: i32, tag: libc::uintptr_t) {
+      let vt = tag as *mut JlValue;
+      /*
+      // TODO the following is pseudo-code; I still need to figure out
+      //  how the tagging is really worked/intended to work.
+      match vt {
+        DataType::JL_WEAKREF_T => println!("scanned a weak-ref: TODO"),
+        DataType::JL_DATATYPE_T => println!("scanned a datatype: TODO"),
+        DataType::JL_UNIONTYPE_T => println!("scanned a union type: TODO")
+        // etc...
+        //JL_TASK_T =>
+        //JL_EXPR_T =>
+        //JL_METHTABLE_T =>
+        //JL_TYPEMAP_LEVEL_T =>
+        //JL_TYPEMAP_ENTRY_T =>
+        //JL_MODULE_T =>
+      };
+      */
     }
 
     fn mark_thread_local(&mut self, ptls: &*mut JlTLS) {
