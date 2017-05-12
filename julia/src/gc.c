@@ -1199,7 +1199,7 @@ STATIC_INLINE int gc_push_root(jl_ptls_t ptls, void *v, int d) // v isa jl_value
     if (!gc_marked(tag)) {
         uint8_t bits;
         if (__likely(gc_setmark_tag(o, GC_MARKED, tag, &bits))) {
-            tag = tag & ~(uintptr_t)15;
+            tag = tag & ~(uintptr_t)15; // tag is header with lower 15-bits set to 0
             if (!gc_verifying)
                 gc_mark_obj(ptls, (jl_value_t*)v, tag, bits);
             gc_scan_obj_(ptls, (jl_value_t*)v, d, tag, bits);

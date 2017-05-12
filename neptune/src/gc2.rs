@@ -11,6 +11,11 @@ const TAG_BITS: u8 = 2; // number of tag bits
 const GC_N_POOLS: usize = 41;
 const JL_SMALL_BYTE_ALIGNMENT: usize = 16;
 
+const GC_CLEAN: u8 = 0;
+const GC_MARKED: u8 = 1;
+const GC_OLD: u8 = 2;
+const GC_OLD_MARKED: u8 = (GC_OLD | GC_MARKED);
+
 // offset for aligning data in page to 16 bytes (JL_SMALL_BYTE_ALIGNMENT) after tag.
 pub const GC_PAGE_OFFSET: usize = (JL_SMALL_BYTE_ALIGNMENT - (SIZE_OF_JLTAGGEDVALUE % JL_SMALL_BYTE_ALIGNMENT));
 
@@ -67,10 +72,6 @@ const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(
  * and add the size of the header, to get the pointer to the value it stores
  */
 impl JlTaggedValue {
-    
-    pub unsafe fn as_tagged_value(vl: &*mut JlValue) -> * mut JlTaggedValue {
-      mem::transmute(vl) // TODO fix (subtract some pointer?) based on the offsets we're using; just for compiling right now
-    }
 
     // implement union members by transmuting memory
     pub unsafe fn next(&self) -> * const JlTaggedValue {
@@ -482,9 +483,10 @@ impl<'a> Gc2<'a> {
         // 4. check object to finalize
         // 5. sweep (if quick sweep, put remembered objects in queued state)
         for t in jl_all_tls_states.iter() {
-            self.premark(t);
-            self.mark_remset(t);
-            self.mark_thread_local(t);
+            let tl_gc = unsafe { &mut * (**t).tl_gcs };
+            tl_gc.premark();
+            tl_gc.mark_remset();
+            tl_gc.mark_thread_local();
         }
         self.mark_roots(); // TODO
         self.visit_mark_stack(); // TODO
@@ -493,17 +495,20 @@ impl<'a> Gc2<'a> {
         false
     }
 
-    fn premark(&mut self, ptls: &*mut JlTLS) {
+    fn premark(&mut self) {
       mem::swap(&mut self.heap.remset, &mut self.heap.last_remset);
+      for item in self.heap.remset.iter() {
+        // TODO import and call objprofile_count(..)
+        unsafe { (*as_mut_jltaggedvalue(*item)).set_tag(GC_OLD_MARKED) };
+      }
       //self.heap.remset.len = 0;
       //self.heap.remset_nptr = 0;
       // TODO
     }
 
-    fn mark_remset(&self, ptls: &*mut JlTLS) {
+    fn mark_remset(&self) {
       for item in &self.heap.last_remset { // TODO what
-        self.scan_obj(ptls, item, 0,
-          unsafe { (*<JlTaggedValue>::as_tagged_value(item as &*mut JlValue)).header } );
+        self.scan_obj(item, 0, unsafe { (*as_jltaggedvalue(*item)).header } );
       }
 
       for item in &self.heap.rem_bindings {
@@ -518,8 +523,7 @@ impl<'a> Gc2<'a> {
     // callers use mutable reference too, etc.
     // Julia's gc marks the object and recursively marks its children, queueing objecs
     // on mark stack when recursion depth is too great.
-    fn scan_obj(&self, ptls: &*mut JlTLS,
-                v: &*mut JlValue, d: i32, tag: libc::uintptr_t) {
+    fn scan_obj(&self, v: &*mut JlValue, d: i32, tag: libc::uintptr_t) {
       let vt = tag as *mut JlValue;
       // TODO the following is pseudo-code; I still need to figure out
       //  how the tagging is really worked/intended to work.
@@ -539,7 +543,7 @@ impl<'a> Gc2<'a> {
       */
     }
 
-    fn mark_thread_local(&mut self, ptls: &*mut JlTLS) {
+    fn mark_thread_local(&mut self) {
 
     }
 
