@@ -24,6 +24,14 @@ pub type JlValue = libc::c_void;
 pub type JlTask = libc::c_void;
 pub type JlModule = libc::c_void;
 
+pub unsafe fn as_jltaggedvalue(v: * const JlValue) -> * const JlTaggedValue {
+    mem::transmute::<* const JlValue, * const JlTaggedValue>(v).offset(-1)
+}
+
+pub unsafe fn as_mut_jltaggedvalue(v: * mut JlValue) -> * mut JlTaggedValue {
+    mem::transmute::<* mut JlValue, * mut JlTaggedValue>(v).offset(-1)
+}
+
 // this is actually just the tag
 pub struct JlTaggedValue {
     pub header: libc::uintptr_t
