@@ -92,6 +92,11 @@ extern {
     pub static jl_all_tls_states: Vec<* mut JlTLS>;
 
     pub static jl_page_size: usize;
+
+    // jl_nothing is a value inhabiting bottom, similar to NULL. It is used for
+    // invalidating weak references so its type should match weak reference
+    // types.
+    pub static jl_nothing: * mut JlValue;
 }
 
 pub fn jl_value_of(t: &JlTaggedValue) -> &JlValue {

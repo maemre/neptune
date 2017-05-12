@@ -177,7 +177,16 @@ impl<'a> GcPool<'a> {
 #[repr(C)]
 pub struct WeakRef {
     // JL_DATA_TYPE exists before the pointer
-    pub value: Option<Box<JlValue>>,
+    pub value: * mut JlValue,
+}
+
+impl WeakRef {
+    // extract JlValue representation of this WeakRef
+    pub fn as_jlvalue(&self) -> &JlValue {
+        unsafe {
+            mem::transmute(self)
+        }
+    }
 }
 
 // JlSym is opaque to Rust because we don't care about its details
@@ -674,7 +683,22 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    fn sweep_weakrefs(&mut self, full: bool) {
+    fn sweep_weakrefs(&mut self) {
+        let mut i = 0;
+        while i < self.heap.weak_refs.len() {
+            if unsafe { (* as_jltaggedvalue(self.heap.weak_refs[i].as_jlvalue())).marked() } {
+                let ref mut wr = self.heap.weak_refs[i];
+                // weakref is alive
+                if ! unsafe { (* as_jltaggedvalue(wr.value)).marked() } {
+                    // however, referenced value is dead, so invalidate weakref
+                    wr.value = jl_nothing;
+                }
+                i += 1;
+            } else {
+                // drop weakref
+                self.heap.weak_refs.swap_remove(i);
+            }
+        }
     }
 
     // sweep the memory page by page.
@@ -684,6 +708,9 @@ impl<'a> Gc2<'a> {
     fn sweep(&mut self, full: bool) {
         self.sweep_pools(full);
         self.sweep_bigvals(full);
-        self.sweep_weakrefs(full);
+        for t in jl_all_tls_states.iter() {
+            let tl_gc = unsafe { &mut * (**t).tl_gcs };
+            tl_gc.sweep_weakrefs();
+        }
     }
 }
