@@ -219,7 +219,7 @@ pub struct ThreadHeap<'a> {
     // big objects
     big_objects: Vec<&'a mut BigVal>,
     // remset
-    rem_bindings: Vec<JlBinding<'a>>,
+    rem_bindings: Vec<JlBinding<'a>>, // TODO what is this used for?
     remset: Vec<* mut JlValue>,
     last_remset: Vec<* mut JlValue>,
 }
@@ -478,6 +478,10 @@ impl<'a> Gc2<'a> {
             self.mark_remset(t);
             self.mark_thread_local(t);
         }
+        self.mark_roots(); // TODO
+        self.visit_mark_stack(); // TODO
+
+        self.sweep(full);
         false
     }
 
@@ -489,14 +493,23 @@ impl<'a> Gc2<'a> {
     }
 
     fn mark_remset(&self, ptls: &*mut JlTLS) {
-      for item in &self.heap.last_remset {
+      for item in &self.heap.last_remset { // TODO what
         self.scan_obj(ptls, item, 0,
           unsafe { (*<JlTaggedValue>::as_tagged_value(item as &*mut JlValue)).header } );
       }
+
+      for item in &self.heap.rem_bindings {
+        // push root(ptls, ptr->value, 0) 
+        // if item was young, put on rem_bindings list, so that by end, rem_bindings list's length is
+        // the number of new items pushed
+      }
+      //self.heap.rem_bindings TODO
     }
 
     // TODO may need self to be mutable, meaning need to make
     // callers use mutable reference too, etc.
+    // Julia's gc marks the object and recursively marks its children, queueing objecs
+    // on mark stack when recursion depth is too great.
     fn scan_obj(&self, ptls: &*mut JlTLS,
                 v: &*mut JlValue, d: i32, tag: libc::uintptr_t) {
       let vt = tag as *mut JlValue;
@@ -523,6 +536,14 @@ impl<'a> Gc2<'a> {
     }
 
     fn get_frames() {
+
+    }
+
+    fn mark_roots(&mut self) {
+
+    }
+
+    fn visit_mark_stack(&mut self) {
 
     }
 

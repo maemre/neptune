@@ -111,7 +111,7 @@ pub struct JlThreadHeap {
     pub mallocarrays: *mut MallocArray,
     pub mafreelist: *mut MallocArray,
     pub big_objects: *mut BigVal,
-    pub rem_bindings: JlArrayList,
+    pub rem_bindings: JlArrayList, // TODO what are these?
     pub _remset: [JlArrayList; 2],
     pub remset_nptr: c_int,
     pub remset: *mut JlArrayList,
