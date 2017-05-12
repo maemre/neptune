@@ -714,11 +714,11 @@ impl<'a> Gc2<'a> {
     // N.B. in this code, a "chunk" refers to 32 contiguous pages that
     // correspond to an element of allocmap.
     fn sweep(&mut self, full: bool) {
-        self.sweep_pools(full);
-        self.sweep_bigvals(full);
         for t in jl_all_tls_states.iter() {
             let tl_gc = unsafe { &mut * (**t).tl_gcs };
             tl_gc.sweep_weakrefs();
         }
+        self.sweep_pools(full);
+        self.sweep_bigvals(full);
     }
 }
