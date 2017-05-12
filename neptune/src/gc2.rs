@@ -67,7 +67,7 @@ const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(
  * and add the size of the header, to get the pointer to the value it stores
  */
 impl JlTaggedValue {
-
+    
     pub unsafe fn as_tagged_value(vl: &*mut JlValue) -> * mut JlTaggedValue {
       mem::transmute(vl) // TODO fix (subtract some pointer?) based on the offsets we're using; just for compiling right now
     }
@@ -96,12 +96,20 @@ impl JlTaggedValue {
         self.header.set_bits(0..TAG_BITS, tag as usize);
     }
 
-    pub unsafe fn markbit(&self) -> libc::uintptr_t {
-      self.header.get_bits(0..TAG_BITS) // TODO change, just for compiling right now
+    pub unsafe fn marked(&self) -> bool {
+        self.header.get_bit(0)
     }
 
-    pub unsafe fn set_markbit(&mut self, markbit: u8) {
-
+    pub unsafe fn set_marked(&mut self, flag: bool) {
+        self.header.set_bit(0, flag);
+    }
+    
+    pub unsafe fn old(&self) -> bool {
+      self.header.get_bit(1)
+    }
+    
+    pub unsafe fn set_old(&mut self, flag: bool) {
+        self.header.set_bit(1, flag);
     }
 }
 
@@ -589,7 +597,7 @@ impl<'a> Gc2<'a> {
                             let o = unsafe {
                                 mem::transmute::<&u8, &JlTaggedValue>(&page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
                             };
-                            if unsafe { o.markbit() } == 0 { // TODO: make markbit a bool
+                            if unsafe { o.marked() } {
                                 nfree += 1;
                             }
                         }
@@ -643,7 +651,7 @@ impl<'a> Gc2<'a> {
         let mut nbig_obj = self.heap.big_objects.len();
         let mut i = 0;
         while i < nbig_obj {
-            if unsafe { self.heap.big_objects[i].taggedvalue().markbit() } == 0 {
+            if unsafe { self.heap.big_objects[i].taggedvalue().marked() } {
                 let b = self.heap.big_objects.swap_remove(i);
                 nbig_obj -= 1;
                 // TODO: fix this by adding some info to BigVals
