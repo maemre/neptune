@@ -265,11 +265,20 @@ impl BigVal {
 #[repr(C)]
 pub struct MallocArray {
     a: Box<JlArray>,
-    next: Box<MallocArray>
+    next: Option<Box<MallocArray>>
+}
+
+impl MallocArray {
+    pub fn new(a: Box<JlArray>) -> Self {
+        MallocArray {
+            a: a,
+            next: None,
+        }
+    }
 }
 
 #[repr(C)]
-struct JlArray {
+pub struct JlArray {
     data: *mut c_void,
     // assuming STORE_ARRAY_LEN, comment next line if not
     length: usize,

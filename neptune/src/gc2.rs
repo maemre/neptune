@@ -488,6 +488,14 @@ impl<'a> Gc2<'a> {
         alloc::heap::deallocate(mem::transmute::<* mut T, * mut u8>(ptr), size, 8);
     }
 
+    // TODO: export this to Julia
+    // keep track of array with malloc'd storage
+    pub fn track_malloced_array(&mut self, a: * mut JlArray) {
+        // N.B. This is *NOT* a GC safepoint due to heap mutation!!!
+        // TODO: use mafreelist first
+        self.heap.mallocarrays.push(MallocArray::new(unsafe { Box::from_raw(a) }));
+    }
+
     pub fn collect(&mut self, full: bool) -> bool {
         // julia's gc.c does the following:
         // 1. fix GC bits of objects in the memset
