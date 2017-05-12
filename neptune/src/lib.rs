@@ -11,6 +11,7 @@ extern crate libc;
 extern crate bit_field;
 extern crate core;
 extern crate alloc;
+extern crate threadpool;
 
 //#[cfg(test)]
 //mod tests;
