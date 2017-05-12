@@ -513,9 +513,9 @@ impl<'a> Gc2<'a> {
     fn scan_obj(&self, ptls: &*mut JlTLS,
                 v: &*mut JlValue, d: i32, tag: libc::uintptr_t) {
       let vt = tag as *mut JlValue;
-      /*
       // TODO the following is pseudo-code; I still need to figure out
       //  how the tagging is really worked/intended to work.
+      /*
       match vt {
         DataType::JL_WEAKREF_T => println!("scanned a weak-ref: TODO"),
         DataType::JL_DATATYPE_T => println!("scanned a datatype: TODO"),

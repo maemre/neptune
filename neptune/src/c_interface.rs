@@ -24,10 +24,38 @@ pub type JlValue = libc::c_void;
 pub type JlTask = libc::c_void;
 pub type JlModule = libc::c_void;
 
-pub enum DataType {
-  JL_WEAKREF_T,
-  JL_DATATYPE_T,
-  JL_UNIONTYPE_T,
+pub struct JlDatatypeLayout {
+  nfields: u32,
+  alignment: u32, // TODO 9 bits
+  haspadding: u32, // TODO 1 bit
+  npointers: u32, // TODO 20 bits
+  fielddesc_type: u32 // TODO 2 bits
+}
+
+pub struct JlSVec {
+  //JL_DATA_TYPE
+  length: usize,
+}
+
+pub struct JlDatatype {
+  //JL_DATA_TYPE
+  pub name: String,
+  pub super_t: *const JlDatatype,
+  pub parameters: JlSVec, // TODO
+  pub types: JlSVec, // TODO
+  pub instance: JlValue,  // for singletons
+  pub layout: *const JlDatatypeLayout,
+  pub size: i32,
+  pub ninitialized: i32,
+  pub uid: u32,
+  pub stract: u8,
+  pub mutabl: u8,
+  // memoized properties
+  pub struct_decl: *mut c_void,  //llvm::Type*
+  pub ditype: *mut c_void, // llvm::MDNode* to be used as llvm::DIType(ditype)
+  pub depth: u32,
+  pub hasfreetypevars: u8,
+  pub isleaftype: u8,
 }
 
 // this is actually just the tag
