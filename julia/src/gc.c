@@ -1762,6 +1762,11 @@ static void jl_gc_mark_remset(jl_ptls_t ptls, jl_ptls_t ptls2)
         // as an exception is thrown after it was already queued (#10221)
         if (!ptr->value) continue;
         if (gc_push_root(ptls, ptr->value, 0)) {
+            // replacing list items as we go (when gc_push_root() returns
+            // non-zero, it pushed a young item, so we replace item at
+            // n_bnd_refyoung index with current item. Since n_bnd_refyoung
+            // is guaranteed to increase no faster than i, no risk of race in
+            // deleting original items[i] before we get to it.
             items[n_bnd_refyoung] = ptr;
             n_bnd_refyoung++;
         }

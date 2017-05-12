@@ -32,6 +32,40 @@ pub unsafe fn as_mut_jltaggedvalue(v: * mut JlValue) -> * mut JlTaggedValue {
     mem::transmute::<* mut JlValue, * mut JlTaggedValue>(v).offset(-1)
 }
 
+pub struct JlDatatypeLayout {
+  nfields: u32,
+  alignment: u32, // TODO 9 bits
+  haspadding: u32, // TODO 1 bit
+  npointers: u32, // TODO 20 bits
+  fielddesc_type: u32 // TODO 2 bits
+}
+
+pub struct JlSVec {
+  //JL_DATA_TYPE
+  length: usize,
+}
+
+pub struct JlDatatype {
+  //JL_DATA_TYPE
+  pub name: String,
+  pub super_t: *const JlDatatype,
+  pub parameters: JlSVec, // TODO
+  pub types: JlSVec, // TODO
+  pub instance: JlValue,  // for singletons
+  pub layout: *const JlDatatypeLayout,
+  pub size: i32,
+  pub ninitialized: i32,
+  pub uid: u32,
+  pub stract: u8,
+  pub mutabl: u8,
+  // memoized properties
+  pub struct_decl: *mut c_void,  //llvm::Type*
+  pub ditype: *mut c_void, // llvm::MDNode* to be used as llvm::DIType(ditype)
+  pub depth: u32,
+  pub hasfreetypevars: u8,
+  pub isleaftype: u8,
+}
+
 // this is actually just the tag
 pub struct JlTaggedValue {
     pub header: libc::uintptr_t
@@ -113,7 +147,7 @@ pub struct JlThreadHeap {
     pub mallocarrays: *mut MallocArray,
     pub mafreelist: *mut MallocArray,
     pub big_objects: *mut BigVal,
-    pub rem_bindings: JlArrayList,
+    pub rem_bindings: JlArrayList, // TODO what are these?
     pub _remset: [JlArrayList; 2],
     pub remset_nptr: c_int,
     pub remset: *mut JlArrayList,
