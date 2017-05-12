@@ -112,6 +112,11 @@ impl JlTaggedValue {
     pub unsafe fn set_old(&mut self, flag: bool) {
         self.header.set_bit(1, flag);
     }
+
+    #[inline(always)]
+    pub fn type_tag(&self) -> libc::uintptr_t {
+        self.header & (!15)
+    }
 }
 
 #[cfg(test)]
