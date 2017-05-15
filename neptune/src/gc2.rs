@@ -546,46 +546,46 @@ impl<'a> Gc2<'a> {
     // Julia's gc marks the object and recursively marks its children, queueing objecs
     // on mark stack when recursion depth is too great.
     fn scan_obj(&self, v: &*mut JlValue, _d: i32, tag: libc::uintptr_t, bits: u8) {
-      let vt: *const JlDatatype = tag as *mut JlDatatype;
-      let mut d = _d;
-      let mut nptr = 0;
-      let mut refyoung = 0;
+        let vt: *const JlDatatype = tag as *mut JlDatatype;
+        let mut d = _d;
+        let mut nptr = 0;
+        let mut refyoung = 0;
 
-      assert_ne!(bits & GC_MARKED, 0);
-      assert_ne!(vt, jl_symbol_type);
-      if vt == jl_weakref_type || unsafe { (*(*vt).layout).npointers == 0 } {
-        return // don't mark weakref, fast path (what?)
-      }
-      d += 1;
-      if d >= MAX_MARK_DEPTH {
-        self.queue_the_root();
-        return
-      }
+        assert_ne!(bits & GC_MARKED, 0);
+        assert_ne!(vt, jl_symbol_type);
+        if vt == jl_weakref_type || unsafe { (*(*vt).layout).npointers == 0 } {
+            return // don't mark weakref, fast path (what?)
+        }
+        d += 1;
+        if d >= MAX_MARK_DEPTH {
+            self.queue_the_root();
+            return
+        }
 
-      if vt == jl_simplevector_type {
-      /*
-        // TODO
-        let vec = vt as *const JlSVec;
-        let l = unsafe { (*vec).length };
-        let data =  // TODO not sure, see src/julia.h: ((jl_value_t **)((char *)(v) + sizeof(jl_svec_t)))
-        foreach non-null element of data
-          verify parent??
-         refyoung |= self.gc_push_root(element, d)
-      */
-        print!("Simple Vector Type!")
-      } else if unsafe { (*vt).name == jl_array_typename } {
-        // TODO
-      } else if vt == jl_module_type {
-        // TODO
-      } else if vt == jl_task_type {
-        // TODO
-      } else {
-        // TODO
-      }
-
-      if bits == GC_OLD_MARKED && refyoung > 0 && !gc_verifying {
-        //self.heap.remset.push(v); // TODO again, I fight with Rust...
-      }
+        if vt == jl_simplevector_type {
+            /*
+            // TODO
+            let vec = vt as *const JlSVec;
+            let l = unsafe { (*vec).length };
+            let data =  // TODO not sure, see src/julia.h: ((jl_value_t **)((char *)(v) + sizeof(jl_svec_t)))
+            foreach non-null element of data
+            verify parent??
+            refyoung |= self.gc_push_root(element, d)
+             */
+            print!("Simple Vector Type!")
+        } else if unsafe { (*vt).name == jl_array_typename } {
+            // TODO
+        } else if vt == jl_module_type {
+            // TODO
+        } else if vt == jl_task_type {
+            // TODO
+        } else {
+            // TODO
+        }
+        
+        if bits == GC_OLD_MARKED && refyoung > 0 && ! get_gc_verifying() {
+            //self.heap.remset.push(v); // TODO again, I fight with Rust...
+        }
     }
 
     fn queue_the_root(&self) {

@@ -152,7 +152,20 @@ extern {
     pub static jl_module_type: *const JlDatatype;
     pub static jl_task_type: *const JlDatatype;
 
-    pub static gc_verifying: bool;
+    #[cfg(gc_verify)]
+    pub static gc_verifying: libc::c_int;
+}
+
+#[cfg(gc_verify)]
+#[inline(always)]
+pub fn get_gc_verifying() -> bool {
+    gc_verifying != 0
+}
+
+#[cfg(not(gc_verify))]
+#[inline(always)]
+pub fn get_gc_verifying() -> bool {
+    false
 }
 
 pub fn jl_value_of(t: &JlTaggedValue) -> &JlValue {
