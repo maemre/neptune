@@ -106,11 +106,11 @@ impl JlTaggedValue {
     pub unsafe fn set_marked(&mut self, flag: bool) {
         self.header.set_bit(0, flag);
     }
-    
+
     pub unsafe fn old(&self) -> bool {
       self.header.get_bit(1)
     }
-    
+
     pub unsafe fn set_old(&mut self, flag: bool) {
         self.header.set_bit(1, flag);
     }
@@ -182,13 +182,7 @@ pub struct WeakRef {
     pub value: * mut JlValue,
 }
 
-impl WeakRef {
-    // extract JlValue representation of this WeakRef
-    pub fn as_jlvalue(&self) -> &JlValue {
-        unsafe {
-            mem::transmute(self)
-        }
-    }
+impl JlValueMarker for WeakRef {
 }
 
 // JlSym is opaque to Rust because we don't care about its details
@@ -229,6 +223,9 @@ impl<'a> JlBinding<'a> {
     pub fn set_deprecated(&mut self, flag: bool) {
         self.bitflags.set_bit(3, flag);
     }
+}
+
+impl<'a> JlValueMarker for JlBinding<'a> {
 }
 
 // Thread-local heap
@@ -490,6 +487,14 @@ impl<'a> Gc2<'a> {
         alloc::heap::deallocate(mem::transmute::<* mut T, * mut u8>(ptr), size, 8);
     }
 
+    // TODO: export this to Julia
+    // keep track of array with malloc'd storage
+    pub fn track_malloced_array(&mut self, a: * mut JlArray) {
+        // N.B. This is *NOT* a GC safepoint due to heap mutation!!!
+        // TODO: use mafreelist first
+        self.heap.mallocarrays.push(MallocArray::new(unsafe { Box::from_raw(a) }));
+    }
+
     pub fn collect(&mut self, full: bool) -> bool {
         // julia's gc.c does the following:
         // 1. fix GC bits of objects in the memset
@@ -529,7 +534,7 @@ impl<'a> Gc2<'a> {
       }
 
       for item in &self.heap.rem_bindings {
-        // push root(ptls, ptr->value, 0) 
+        // push root(ptls, ptr->value, 0)
         // if item was young, put on rem_bindings list, so that by end, rem_bindings list's length is
         // the number of new items pushed
       }
@@ -607,6 +612,11 @@ impl<'a> Gc2<'a> {
     pub fn mark<>
     */
 
+
+    // sweep the object pool memory page by page.
+    //
+    // N.B. in this code, a "chunk" refers to 32 contiguous pages that
+    // correspond to an element of allocmap.
     fn sweep_pools(&mut self, full: bool) {
                 // TODO: reset freelists before sweep
         // TODO: get this from page manager
@@ -731,16 +741,39 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    // sweep the memory page by page.
-    //
-    // N.B. in this code, a "chunk" refers to 32 contiguous pages that
-    // correspond to an element of allocmap.
+    #[inline(always)]
+    fn sweep_remset(&mut self, full: bool) {
+        if full {
+            // this is a full sweep, clear remsets
+            self.heap.remset.truncate(0);
+            self.heap.rem_bindings.truncate(0);
+        } else {
+            // this is a quicksweep, mark objects in remset so that they will
+            // not trigger the write barrier till next full sweep
+            for v in self.heap.remset.iter_mut() {
+                unsafe {
+                    (*as_mut_jltaggedvalue(*v)).set_tag(GC_MARKED);
+                }
+            }
+
+            for v in self.heap.rem_bindings.iter_mut() {
+                unsafe {
+                    (*as_mut_jltaggedvalue(v.as_mut_jlvalue())).set_tag(GC_MARKED);
+                }
+            }
+        }
+    }
+
     fn sweep(&mut self, full: bool) {
+        for t in jl_all_tls_states.iter() {
+            let tl_gc = unsafe { &mut * (**t).tl_gcs };
+            tl_gc.sweep_weakrefs();
+        }
         self.sweep_pools(full);
         self.sweep_bigvals(full);
         for t in jl_all_tls_states.iter() {
             let tl_gc = unsafe { &mut * (**t).tl_gcs };
-            tl_gc.sweep_weakrefs();
+            tl_gc.sweep_remset(full);
         }
     }
 }

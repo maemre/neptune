@@ -24,6 +24,36 @@ pub type JlValue = libc::c_void;
 pub type JlTask = libc::c_void;
 pub type JlModule = libc::c_void;
 
+// This is a marker trait for data structures that are allocated as JlValue, if
+// a data structure implements this then it promises its memory layout to be
+// same as a JlValue and promises that it has a tag for GC, runtime type tag
+// etc.
+pub trait JlValueMarker {
+}
+
+// This trait provides casting to JlValue for the types that implement it
+pub trait JlValueLike {
+    // extract JlValue representation of this struct
+    fn as_jlvalue(&self) -> &JlValue;
+
+    fn as_mut_jlvalue(&mut self) -> &mut JlValue;
+}
+
+// Automatic derivation of JlValue casting for types that implement JlValueMarker
+impl<T> JlValueLike for T where T: Sized+JlValueMarker {
+    fn as_mut_jlvalue(&mut self) -> &mut JlValue {
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+
+    fn as_jlvalue(&self) -> &JlValue {
+        unsafe {
+            mem::transmute(self)
+        }
+    }
+}
+
 pub unsafe fn as_jltaggedvalue(v: * const JlValue) -> * const JlTaggedValue {
     mem::transmute::<* const JlValue, * const JlTaggedValue>(v).offset(-1)
 }
