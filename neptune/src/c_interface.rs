@@ -33,37 +33,51 @@ pub unsafe fn as_mut_jltaggedvalue(v: * mut JlValue) -> * mut JlTaggedValue {
 }
 
 pub struct JlDatatypeLayout {
-  nfields: u32,
-  alignment: u32, // TODO 9 bits
-  haspadding: u32, // TODO 1 bit
-  npointers: u32, // TODO 20 bits
-  fielddesc_type: u32 // TODO 2 bits
+    pub nfields: u32,
+    pub alignment: u32, // TODO 9 bits
+    pub haspadding: u32, // TODO 1 bit
+    pub npointers: u32, // TODO 20 bits
+    pub fielddesc_type: u32 // TODO 2 bits
 }
 
+// TODO
 pub struct JlSVec {
-  //JL_DATA_TYPE
-  length: usize,
+    //JL_DATA_TYPE
+    pub length: usize,
 }
 
+// Might not be correct, might be needed, might be incomplete
 pub struct JlDatatype {
-  //JL_DATA_TYPE
-  pub name: String,
-  pub super_t: *const JlDatatype,
-  pub parameters: JlSVec, // TODO
-  pub types: JlSVec, // TODO
-  pub instance: JlValue,  // for singletons
-  pub layout: *const JlDatatypeLayout,
-  pub size: i32,
-  pub ninitialized: i32,
-  pub uid: u32,
-  pub stract: u8,
-  pub mutabl: u8,
-  // memoized properties
-  pub struct_decl: *mut c_void,  //llvm::Type*
-  pub ditype: *mut c_void, // llvm::MDNode* to be used as llvm::DIType(ditype)
-  pub depth: u32,
-  pub hasfreetypevars: u8,
-  pub isleaftype: u8,
+    //JL_DATA_TYPE
+    pub name: *const JlTypename,
+    pub super_t: *const JlDatatype,
+    pub parameters: JlSVec,
+    pub types: JlSVec,
+    pub instance: JlValue,  // for singletons
+    pub layout: *const JlDatatypeLayout,
+    pub size: i32,
+    pub ninitialized: i32,
+    pub uid: u32,
+    pub stract: u8,
+    pub mutabl: u8,
+    // memoized properties
+    pub struct_decl: *mut c_void,  //llvm::Type*
+    pub ditype: *mut c_void, // llvm::MDNode* to be used as llvm::DIType(ditype)
+    pub depth: u32,
+    pub hasfreetypevars: u8,
+    pub isleaftype: u8,
+}
+
+pub struct JlTypename {
+    //JL_DATA_TYPE
+    pub name: *mut c_void, // jl_sym_t
+    pub module: *mut c_void, // jl_module_t
+    names: *mut JlSVec,  // jl_svec_t field names
+    wrapper: *mut JlValue,
+    cache: *mut JlSVec,        // sorted array
+    linearcache: *mut JlSVec,  // unsorted array
+    hash: i32, // inptr_t
+    mt: *mut c_void, // struct _jl_methtable_t
 }
 
 // this is actually just the tag
@@ -97,6 +111,18 @@ extern {
     // invalidating weak references so its type should match weak reference
     // types.
     pub static jl_nothing: * mut JlValue;
+    /* From julia/src/jltypes.c */
+    pub static jl_any_type: *const JlDatatype;
+    pub static jl_type_type: *const c_void;
+    pub static jl_symbol_type: *const JlDatatype;
+    pub static jl_weakref_type: *const JlDatatype;
+    pub static jl_simplevector_type: *const JlDatatype;
+    pub static jl_array_typename: *const JlTypename;
+    pub static jl_typename: *const JlTypename;
+    pub static jl_module_type: *const JlDatatype;
+    pub static jl_task_type: *const JlDatatype;
+
+    pub static gc_verifying: bool;
 }
 
 pub fn jl_value_of(t: &JlTaggedValue) -> &JlValue {

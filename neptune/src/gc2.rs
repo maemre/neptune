@@ -16,6 +16,8 @@ const GC_MARKED: u8 = 1;
 const GC_OLD: u8 = 2;
 const GC_OLD_MARKED: u8 = (GC_OLD | GC_MARKED);
 
+const MAX_MARK_DEPTH: i32 = 400;
+
 // offset for aligning data in page to 16 bytes (JL_SMALL_BYTE_ALIGNMENT) after tag.
 pub const GC_PAGE_OFFSET: usize = (JL_SMALL_BYTE_ALIGNMENT - (SIZE_OF_JLTAGGEDVALUE % JL_SMALL_BYTE_ALIGNMENT));
 
@@ -522,7 +524,8 @@ impl<'a> Gc2<'a> {
 
     fn mark_remset(&self) {
       for item in &self.heap.last_remset { // TODO what
-        self.scan_obj(item, 0, unsafe { (*as_jltaggedvalue(*item)).header } );
+        let tag = unsafe { &*as_jltaggedvalue(*item) };
+        self.scan_obj(item, 0, tag.type_tag(), (tag.header & 0x0f) as u8);
       }
 
       for item in &self.heap.rem_bindings {
@@ -537,24 +540,51 @@ impl<'a> Gc2<'a> {
     // callers use mutable reference too, etc.
     // Julia's gc marks the object and recursively marks its children, queueing objecs
     // on mark stack when recursion depth is too great.
-    fn scan_obj(&self, v: &*mut JlValue, d: i32, tag: libc::uintptr_t) {
-      let vt = tag as *mut JlValue;
-      // TODO the following is pseudo-code; I still need to figure out
-      //  how the tagging is really worked/intended to work.
+    fn scan_obj(&self, v: &*mut JlValue, _d: i32, tag: libc::uintptr_t, bits: u8) {
+      let vt: *const JlDatatype = tag as *mut JlDatatype;
+      let mut d = _d;
+      let mut nptr = 0;
+      let mut refyoung = 0;
+
+      assert_ne!(bits & GC_MARKED, 0);
+      assert_ne!(vt, jl_symbol_type);
+      if vt == jl_weakref_type || unsafe { (*(*vt).layout).npointers == 0 } {
+        return // don't mark weakref, fast path (what?)
+      }
+      d += 1;
+      if d >= MAX_MARK_DEPTH {
+        self.queue_the_root();
+        return
+      }
+
+      if vt == jl_simplevector_type {
       /*
-      match vt {
-        DataType::JL_WEAKREF_T => println!("scanned a weak-ref: TODO"),
-        DataType::JL_DATATYPE_T => println!("scanned a datatype: TODO"),
-        DataType::JL_UNIONTYPE_T => println!("scanned a union type: TODO")
-        // etc...
-        //JL_TASK_T =>
-        //JL_EXPR_T =>
-        //JL_METHTABLE_T =>
-        //JL_TYPEMAP_LEVEL_T =>
-        //JL_TYPEMAP_ENTRY_T =>
-        //JL_MODULE_T =>
-      };
+        // TODO
+        let vec = vt as *const JlSVec;
+        let l = unsafe { (*vec).length };
+        let data =  // TODO not sure, see src/julia.h: ((jl_value_t **)((char *)(v) + sizeof(jl_svec_t)))
+        foreach non-null element of data
+          verify parent??
+         refyoung |= self.gc_push_root(element, d)
       */
+        print!("Simple Vector Type!")
+      } else if unsafe { (*vt).name == jl_array_typename } {
+        // TODO
+      } else if vt == jl_module_type {
+        // TODO
+      } else if vt == jl_task_type {
+        // TODO
+      } else {
+        // TODO
+      }
+
+      if bits == GC_OLD_MARKED && refyoung > 0 && !gc_verifying {
+        //self.heap.remset.push(v); // TODO again, I fight with Rust...
+      }
+    }
+
+    fn queue_the_root(&self) {
+
     }
 
     fn mark_thread_local(&mut self) {
