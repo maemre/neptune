@@ -701,7 +701,6 @@ impl<'a> Gc2<'a> {
                         if nfree != n_obj {
                             // there are live objects in the page, return free objects to the corresponding free list
                             let tl_gc: &mut Gc2 = unsafe {
-                                // ???
                                 &mut *(get_all_tls()[meta.thread_n as usize].tl_gcs)
                             };
                             let freelist = &mut tl_gc.heap.pools[meta.pool_n as usize].freelist;

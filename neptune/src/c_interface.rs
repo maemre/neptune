@@ -18,7 +18,19 @@ use core::ops::DerefMut;
 use core;
 use bit_field::BitField;
 
-pub type JlJmpBuf = libc::c_void; // we cannot use long jumps in Rust anyways
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct jmp_buf {
+    _data: [u64; 25]
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct sigjmp_buf {
+    _data: [u64; 25]
+}
+
+pub type JlJmpBuf = sigjmp_buf;
 
 // temporary, TODO: reify
 pub type JlValue = libc::c_void;
@@ -340,16 +352,16 @@ pub struct JlTLS {
     pub in_finalizer: u8, // volatile
     pub disable_gc: u8,
     pub defer_signal: sig_atomic_t, // ???
-    pub current_module: Option<JlModule>,
-    pub current_task: Option<JlTask>, // volatile
-    pub root_task: Option<JlTask>,
-    pub task_arg_in_transit: Option<JlValue>, // volatile
+    pub current_module: Option<&'static JlModule>,
+    pub current_task: Option<&'static JlTask>, // volatile
+    pub root_task: Option<&'static JlTask>,
+    pub task_arg_in_transit: Option<&'static JlValue>, // volatile
     pub stackbase: *const c_void,
     pub stack_lo: *const u8,
     pub stack_hi: *const u8,
-    pub jmp_target: Option<JlJmpBuf>, // volatile
-    pub base_ctx: Option<JlJmpBuf>, // base context of stack
-    pub safe_restore: Option<JlJmpBuf>,
+    pub jmp_target: Option<&'static JlJmpBuf>, // volatile
+    pub base_ctx: JlJmpBuf, // base context of stack
+    pub safe_restore: Option<&'static JlJmpBuf>,
     pub tid: i16,
     pub bt_size: usize,
     pub bt_data: *const uintptr_t, // this is an array that is JL_MAX_BT_SIZE + 1 long
@@ -360,7 +372,8 @@ pub struct JlTLS {
     pub system_id: libc::pthread_t, // should remove this on Windows since Julia doesn't have it on Windows
     pub signal_stack: *const c_void, // should remove this on Windows since Julia doesn't have it on Windows
     pub in_pure_callback: c_int,
-    pub finalizers: Vec<Finalizer<'static>>,
+    pub finalizers_inhibited: c_int,
+    pub finalizers: JlArrayList,
     pub gc_cache: GcMarkCache,
     // pointer to thread-local GC-related stuff, lifetime is meaningless!
     pub tl_gcs: * mut Gc2<'static>,
