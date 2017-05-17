@@ -7,5 +7,9 @@
 
 void np_jl_set_typeof(void *v, void *t)
 {
-    jl_set_typeof(v, t);
+  jl_set_typeof(v, t);
+}
+
+jl_value_t ** np_jl_svec_data(jl_value_t *v) {
+  return jl_svec_data(v);
 }

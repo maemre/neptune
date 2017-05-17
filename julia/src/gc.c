@@ -1791,6 +1791,13 @@ static int _jl_gc_collect(jl_ptls_t ptls, int full)
     int64_t last_perm_scanned_bytes = perm_scanned_bytes;
     assert(mark_sp == 0);
 
+    int recollect = neptune_gc_collect(ptls->tl_gcs, full);
+    
+    return recollect;
+
+    // Below this is dead code!
+    
+    /*
     // 1. fix GC bits of objects in the remset.
     for (int t_i = 0; t_i < jl_n_threads; t_i++)
         jl_gc_premark(jl_all_tls_states[t_i]);
@@ -1935,7 +1942,7 @@ static int _jl_gc_collect(jl_ptls_t ptls, int full)
     gc_num.since_sweep = 0;
     gc_num.freed = 0;
 
-    return recollect;
+    */
 }
 
 #ifdef NEPTUNE

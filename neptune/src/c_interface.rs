@@ -168,6 +168,7 @@ extern {
 
     // set type of a value by setting the tag
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
+    pub fn np_jl_svec_data(v: * mut JlValue) -> * const * mut JlValue;
 
     // list of global threads, declared in julia/src/threading.c
     pub static jl_n_threads: u32;
