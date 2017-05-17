@@ -130,10 +130,8 @@ extern {
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
 
     // list of global threads, declared in julia/src/threading.c
-    //pub static jl_all_ts_states: *mut JlTLS;
-    //pub static jl_n_threads: u32;
-    // TODO I'm not sure if this is legal, but it compiles for now
-    pub static jl_all_tls_states: Vec<* mut JlTLS>;
+    pub static jl_n_threads: u32;
+    pub static jl_all_tls_states: * mut &'static mut JlTLS;
 
     pub static jl_page_size: usize;
 
@@ -154,6 +152,13 @@ extern {
 
     #[cfg(gc_verify)]
     pub static gc_verifying: libc::c_int;
+}
+
+// Wrapper for getting all thread states in a safer manner by constructing a
+// slice hence allowing for proper bounds checks
+#[inline(always)]
+pub unsafe fn get_all_tls<'a>() -> &'a mut [&'static mut JlTLS] {
+    ::std::slice::from_raw_parts_mut(jl_all_tls_states, jl_n_threads as usize)
 }
 
 #[cfg(gc_verify)]
@@ -488,6 +493,6 @@ pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static JlTLS,
 
 // Corresponds to _jl_gc_collect
 #[no_mangle]
-pub extern fn neptune_gc_collect<'gc, 'a>(gc: &'gc mut Gc2<'a>, full: bool) -> bool {
-    gc.collect(full)
+pub extern fn neptune_gc_collect<'gc, 'a>(gc: &'gc mut Gc2<'a>, full: c_int) -> c_int {
+    gc.collect(full != 0) as c_int
 }

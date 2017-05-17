@@ -503,8 +503,8 @@ impl<'a> Gc2<'a> {
         // 3. walk roots
         // 4. check object to finalize
         // 5. sweep (if quick sweep, put remembered objects in queued state)
-        for t in jl_all_tls_states.iter() {
-            let tl_gc = unsafe { &mut * (**t).tl_gcs };
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * t.tl_gcs };
             tl_gc.premark();
             tl_gc.mark_remset();
             tl_gc.mark_thread_local();
@@ -618,7 +618,7 @@ impl<'a> Gc2<'a> {
     // N.B. in this code, a "chunk" refers to 32 contiguous pages that
     // correspond to an element of allocmap.
     fn sweep_pools(&mut self, full: bool) {
-                // TODO: reset freelists before sweep
+        // TODO: reset freelists before sweep
         // TODO: get this from page manager
         let regions = unsafe { REGIONS.as_mut().unwrap() };
         let mut remaining_pages = self.pg_mgr.current_pg_count;
@@ -662,7 +662,8 @@ impl<'a> Gc2<'a> {
                         if nfree != n_obj {
                             // there are live objects in the page, return free objects to the corresponding free list
                             let tl_gc: &mut Gc2 = unsafe {
-                                &mut *(&*jl_all_tls_states[meta.thread_n as usize]).tl_gcs
+                                // ???
+                                &mut *(get_all_tls()[meta.thread_n as usize].tl_gcs)
                             };
                             let freelist = &mut tl_gc.heap.pools[meta.pool_n as usize].freelist;
                             for o_idx in 0..n_obj {
@@ -695,10 +696,10 @@ impl<'a> Gc2<'a> {
 
     // sweep bigvals in all threads
     fn sweep_bigvals(&mut self, full: bool) {
-        for ptls in jl_all_tls_states.iter() {
+        for ptls in unsafe { get_all_tls() } {
             // get thread-local Gc
             let tl_gc = unsafe {
-                &mut * (**ptls).tl_gcs
+                &mut * (*ptls).tl_gcs
             };
             tl_gc.sweep_local_bigvals(full);
         }
@@ -765,14 +766,14 @@ impl<'a> Gc2<'a> {
     }
 
     fn sweep(&mut self, full: bool) {
-        for t in jl_all_tls_states.iter() {
-            let tl_gc = unsafe { &mut * (**t).tl_gcs };
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_weakrefs();
         }
         self.sweep_pools(full);
         self.sweep_bigvals(full);
-        for t in jl_all_tls_states.iter() {
-            let tl_gc = unsafe { &mut * (**t).tl_gcs };
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_remset(full);
         }
     }
