@@ -150,6 +150,52 @@ pub struct JlTypename {
     mt: *mut c_void, // struct _jl_methtable_t
 }
 
+#[repr(C)]
+pub struct JlArrayFlags {
+    pub flags: u16 // how:2, ndims:10, pooled:1, ptarray:1, isshared:1, isaligned:1 TODO not sure about order
+}
+
+impl JlArrayFlags {
+    pub fn how(&self) -> u16 {self.flags.get_bits(0..1)}
+    pub fn ndims(&self) -> u16 {self.flags.get_bits(2..11)}
+    pub fn pooled(&self) -> u16 {self.flags.get_bits(12..12)}
+    pub fn ptrarray(&self) -> u16 {self.flags.get_bits(13..13)}
+    pub fn ishared(&self) -> u16 {self.flags.get_bits(14..14)}
+    pub fn isaligned(&self) -> u16 {self.flags.get_bits(15..15)}
+}
+
+pub enum AllocStyle {
+    Inlined = 0,
+    JlBuffer = 1,
+    MallocBuffer = 2,
+    HasOwnerPointer = 3,
+}
+
+#[repr(C)]
+pub struct JlArray {
+    //JL_DATA_TYPE
+    pub data: *mut c_void, // void *
+    pub length: usize, // size_t
+    pub flags: JlArrayFlags,
+    pub elsize: u16,
+    pub offset: u32,
+    pub nrows: usize,
+    pub maxsize_ncols: usize, // size_t
+}
+
+impl JlArray {
+    // imitate ncols in union in C
+    #[inline(always)]
+    pub fn ncols(&self) -> usize {
+        self.maxsize_ncols
+    }
+
+    #[inline(always)]
+    pub fn set_ncols(&mut self, ncols: usize) {
+        self.maxsize_ncols = ncols;
+    }
+}
+
 // this is actually just the tag
 pub struct JlTaggedValue {
     pub header: libc::uintptr_t
@@ -168,7 +214,7 @@ extern {
 
     // set type of a value by setting the tag
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
-    pub fn np_jl_svec_data(v: * mut JlValue) -> * const * mut JlValue;
+    pub fn np_jl_svec_data(v: * mut JlValue) -> * mut * mut JlValue;
 
     // list of global threads, declared in julia/src/threading.c
     pub static jl_n_threads: u32;

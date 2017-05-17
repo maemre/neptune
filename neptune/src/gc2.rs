@@ -563,29 +563,68 @@ impl<'a> Gc2<'a> {
         }
 
         if vt == jl_simplevector_type {
-            /*
-            // TODO
             let vec = vt as *const JlSVec;
+            let data = unsafe { np_jl_svec_data(*v) };
             let l = unsafe { (*vec).length };
-            let data =  // TODO not sure, see src/julia.h: ((jl_value_t **)((char *)(v) + sizeof(jl_svec_t)))
-            foreach non-null element of data
-            verify parent??
-            refyoung |= self.gc_push_root(element, d)
-             */
+            nptr += 1;
+            let elements = unsafe { ::std::slice::from_raw_parts_mut(data, l as usize) };
+            for e in elements {
+                // verify parent?
+                refyoung |= self.gc_push_root(e, d);
+            }
             print!("Simple Vector Type!")
         } else if unsafe { (*vt).name == jl_array_typename } {
+            /*
             // TODO
+            let a = v as *mut JlArray; // TODO
+            let flags = a.flags; // TODO
+            if flags.how() == AllocStyle::HasOwnerPointer {
+                let owner = np_jl_data_owner(a); // TODO
+                refyoung |= self.gc_push_root(owner, d);
+            } else if flags.how() == AllocStyle::JlBuffer {
+                let val_buf = ??? // TODO
+                self.gc_setmark_buf(...) // TODO
+            }
+            // TODO more!
+            */
+
+            print!("Array Type!")
         } else if vt == jl_module_type {
-            // TODO
+            /*
+            refyoung |= self.gc_mark_module
+            */
         } else if vt == jl_task_type {
             // TODO
         } else {
             // TODO
         }
-        
+
         if bits == GC_OLD_MARKED && refyoung > 0 && ! get_gc_verifying() {
             //self.heap.remset.push(v); // TODO again, I fight with Rust...
         }
+    }
+
+    fn gc_push_root(&self, e: &mut *mut JlValue, d: i32) -> i32 {
+        let o = unsafe { &*as_jltaggedvalue(*e as *const JlValue) };
+        let tag = o.header;
+        if unsafe {!o.marked()} { // TODO
+            let mut bits: u8 = 0;
+            if self.gc_setmark_tag(o, GC_MARKED, tag & 0x0f, &mut bits) {
+                self.scan_obj(e, d, tag, bits);
+            }
+            return (bits & GC_OLD != 0) as i32;
+        }
+        return ((tag as u8) & GC_OLD != 0) as i32;
+    }
+
+    fn gc_setmark_tag(&self, o: &JlTaggedValue, mark_mode: u8, tag: usize, bits: &mut u8) -> bool {
+        // TODO!!!
+        return true;
+    }
+
+    fn gc_setmark_buf(&self) -> bool {
+        // TODO!!!
+        return true;
     }
 
     fn queue_the_root(&self) {
