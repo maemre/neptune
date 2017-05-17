@@ -16,6 +16,7 @@ use std::mem;
 use core::ops::Deref;
 use core::ops::DerefMut;
 use core;
+use bit_field::BitField;
 
 pub type JlJmpBuf = libc::c_void; // we cannot use long jumps in Rust anyways
 
@@ -64,10 +65,49 @@ pub unsafe fn as_mut_jltaggedvalue(v: * mut JlValue) -> * mut JlTaggedValue {
 
 pub struct JlDatatypeLayout {
     pub nfields: u32,
-    pub alignment: u32, // TODO 9 bits
-    pub haspadding: u32, // TODO 1 bit
-    pub npointers: u32, // TODO 20 bits
-    pub fielddesc_type: u32 // TODO 2 bits
+    bits: u32, // these will correspond to the bitfields
+}
+
+impl JlDatatypeLayout {
+    #[inline(always)]
+    pub fn alignment(&self) -> u32 {
+        self.bits.get_bits(0..9)
+    }
+
+    #[inline(always)]
+    pub fn set_alignment(&mut self, alignment: u32) {
+        self.bits.set_bits(0..9, alignment);
+    }
+
+    #[inline(always)]
+    pub fn haspadding(&self) -> bool {
+        self.bits.get_bit(9)
+    }
+
+    #[inline(always)]
+    pub fn set_haspadding(&mut self, haspadding: bool) {
+        self.bits.set_bit(9, haspadding);
+    }
+
+    #[inline(always)]
+    pub fn npointers(&self) -> u32 {
+        self.bits.get_bits(10..30)
+    }
+
+    #[inline(always)]
+    pub fn set_npointers(&mut self, npointers: u32) {
+        self.bits.set_bits(10..30, npointers);
+    }
+
+    #[inline(always)]
+    pub fn fielddesc_type(&self) -> u32 {
+        self.bits.get_bits(30..32)
+    }
+
+    #[inline(always)]
+    pub fn set_fielddesc_type(&mut self, fielddesc_type: u32) {
+        self.bits.set_bits(30..32, fielddesc_type);
+    }
 }
 
 // TODO

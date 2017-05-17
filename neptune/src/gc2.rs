@@ -553,7 +553,7 @@ impl<'a> Gc2<'a> {
 
         assert_ne!(bits & GC_MARKED, 0);
         assert_ne!(vt, jl_symbol_type);
-        if vt == jl_weakref_type || unsafe { (*(*vt).layout).npointers == 0 } {
+        if vt == jl_weakref_type || unsafe { (*(*vt).layout).npointers() == 0 } {
             return // don't mark weakref, fast path (what?)
         }
         d += 1;
