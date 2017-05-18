@@ -317,22 +317,25 @@ pub struct Gc2<'a> {
     // parent pointer to thread-local storage for other fields, if necessary
     // we can access stack base etc. from here (?)
     tls: &'static JlTLS,
+    // amount of allocation till next collection
+    allocd: isize,
 }
 
 impl<'a> Gc2<'a> {
     pub fn new(tls: &'static JlTLS, stack: &'static GcFrame, pg_mgr: &'a mut PageMgr) -> Self {
        Gc2 {
-            heap: ThreadHeap::new(),
-            pg_mgr: pg_mgr,
-            cache: GcMarkCache::new(),
-            gc_stack: stack,
-            world_age: 0,
-            gc_state: GcState::Safe,
-            in_finalizer: false,
-            disable_gc: false,
-            finalizers: Vec::new(),
-            finalizers_inhibited: 0,
-            tls: tls
+           heap: ThreadHeap::new(),
+           pg_mgr: pg_mgr,
+           cache: GcMarkCache::new(),
+           gc_stack: stack,
+           world_age: 0,
+           gc_state: GcState::Safe,
+           in_finalizer: false,
+           disable_gc: false,
+           finalizers: Vec::new(),
+           finalizers_inhibited: 0,
+           tls: tls,
+           allocd: 0,
         }
     }
 
@@ -353,6 +356,13 @@ impl<'a> Gc2<'a> {
             Some(s) => s,
             None => panic!("Memory error: requested object is too large to represent with native pointer size")
         };
+        // TODO: make this better, currently we are collecting for every MB
+        self.allocd -= allocsz as isize;
+        if self.allocd < 0 {
+            // self.collect_small();
+            self.allocd += 1 << 20;
+            // println!("collected everything");
+        }
         let v = if allocsz <= GC_MAX_SZCLASS + mem::size_of::<JlTaggedValue>() {
             self.pool_alloc(allocsz)
         } else {
