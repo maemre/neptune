@@ -672,9 +672,12 @@ impl<'a> Gc2<'a> {
         let regions = unsafe { REGIONS.as_mut().unwrap() };
         let mut remaining_pages = self.pg_mgr.current_pg_count;
         'finish: for region in regions {
+            if remaining_pages == 0 {
+                break;
+            }
             // if #pages in region is not a multiple of 32, then we need to check one more
             // entry in allocmap
-            let check_incomplete_chunk = (region.pg_cnt % 32 == 0) as usize;
+            let check_incomplete_chunk = (region.pg_cnt % 32 != 0) as usize;
             for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
                 let mut m = region.allocmap[i];
                 let mut j = 0;
