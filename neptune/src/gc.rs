@@ -163,7 +163,7 @@ pub struct Gc<'a> {
     pub lazy_freed_pages: i64,
     pub page_mgr: PageMgr,
     pub page_size: usize,
-    pub thread_pool: ThreadPool,
+    pub thread_pool: Option<ThreadPool>,
 }
 
 // GC implementation
@@ -196,7 +196,7 @@ impl<'a> Gc<'a> {
             lazy_freed_pages: 0,
             page_mgr: PageMgr::new(),
             page_size: page_size, // equivalent of jl_page_size, size of OS' pages
-            thread_pool: ThreadPool::new(nthreads),
+            thread_pool: None, // Some(ThreadPool::new(nthreads)),
         }
     }
 
