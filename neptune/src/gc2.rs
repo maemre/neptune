@@ -684,7 +684,7 @@ impl<'a> Gc2<'a> {
                 while m != 0 {
                     let pg_idx = 32 * i + j;
                     // if current page is not allocated, skip
-                    if m | 1 == 0 {
+                    if m & 1 == 0 {
                         m >>= 1;
                         j += 1;
                         continue;
