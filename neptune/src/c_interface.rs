@@ -17,6 +17,7 @@ use core::ops::Deref;
 use core::ops::DerefMut;
 use core;
 use bit_field::BitField;
+use std::sync::atomic;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -210,7 +211,7 @@ impl JlArray {
 
 // this is actually just the tag
 pub struct JlTaggedValue {
-    pub header: libc::uintptr_t
+    pub header: atomic::AtomicUsize
 }
 // this is actually mem::size_of::<JlTaggedValue>(), we cannot make it a static const
 // because `size_of` is not yet constant in Rust unfortunately.
@@ -251,6 +252,8 @@ extern {
 
     #[cfg(gc_verify)]
     pub static gc_verifying: libc::c_int;
+
+    pub static mark_reset_age: libc::c_int;
 }
 
 // Wrapper for getting all thread states in a safer manner by constructing a
@@ -346,16 +349,16 @@ pub struct JlTLS {
     pub world_age: usize,
     // using Option instead of Box for values that can be null
     // this works thanks to null pointer optimization in Rust
-    pub exception_in_transit: Option<JlValue>,
+    pub exception_in_transit: Option<&'static mut JlValue>,
     pub safepoint: usize, // volatile, TODO: represent volatility
     pub gc_state: GcState, // volatile
     pub in_finalizer: u8, // volatile
     pub disable_gc: u8,
     pub defer_signal: sig_atomic_t, // ???
-    pub current_module: Option<&'static JlModule>,
-    pub current_task: Option<&'static JlTask>, // volatile
-    pub root_task: Option<&'static JlTask>,
-    pub task_arg_in_transit: Option<&'static JlValue>, // volatile
+    pub current_module: Option<&'static mut JlModule>,
+    pub current_task: Option<&'static mut JlTask>, // volatile
+    pub root_task: Option<&'static mut JlTask>,
+    pub task_arg_in_transit: Option<&'static mut JlValue>, // volatile
     pub stackbase: *const c_void,
     pub stack_lo: *const u8,
     pub stack_hi: *const u8,

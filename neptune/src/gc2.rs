@@ -6,6 +6,7 @@ use c_interface::*;
 use bit_field::BitField;
 use alloc;
 use std::intrinsics;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const TAG_BITS: u8 = 2; // number of tag bits
 const GC_N_POOLS: usize = 41;
@@ -89,35 +90,124 @@ impl JlTaggedValue {
         mem::transmute(self)
     }
     // this is bits in Julia
-    pub unsafe fn tag(&self) -> libc::uintptr_t {
+    pub unsafe fn tag(&self) -> usize {
         // TODO might need to change based on LSB/MSB
-        self.header.get_bits(0..TAG_BITS)
+        self.header.tag()
     }
     // this will panic if one tries to set bits higher than lowest TAG_BITS bits
     pub unsafe fn set_tag(&mut self, tag: u8) {
         // TODO might need to change based on LSB/MSB
-        self.header.set_bits(0..TAG_BITS, tag as usize);
+        self.header.set_tag(tag);
     }
 
     pub unsafe fn marked(&self) -> bool {
-        self.header.get_bit(0)
+        self.header.marked()
     }
 
     pub unsafe fn set_marked(&mut self, flag: bool) {
-        self.header.set_bit(0, flag);
+        self.header.set_marked(flag);
     }
 
     pub unsafe fn old(&self) -> bool {
-      self.header.get_bit(1)
+        self.header.old()
     }
 
     pub unsafe fn set_old(&mut self, flag: bool) {
-        self.header.set_bit(1, flag);
+        self.header.set_old(flag);
+    }
+
+    // read header with relaxed memory guarantees
+    #[inline(always)]
+    pub fn read_header(&self) -> libc::uintptr_t {
+        self.header.load(Ordering::Relaxed)
+    }
+
+    // pointer to type of this value
+    #[inline(always)]
+    pub fn type_tag(&self) -> libc::uintptr_t {
+        self.read_header() & (!0x0f)
+    }
+
+    // bits used for GC etc.
+    #[inline(always)]
+    pub fn nontype_tag(&self) -> libc::uintptr_t {
+        self.read_header() & 0x0f
+    }
+}
+
+trait GcTag {
+    fn tag(&self) -> usize;
+    fn set_tag(&mut self, tag: u8);
+    fn marked(&self) -> bool;
+    fn set_marked(&mut self, flag: bool);
+    fn old(&self) -> bool;
+    fn set_old(&mut self, flag: bool);
+}
+
+impl GcTag for usize {
+    // this is bits in Julia
+    #[inline(always)]
+    fn tag(&self) -> usize {
+        // TODO might need to change based on LSB/MSB
+        self.get_bits(0..TAG_BITS)
     }
 
     #[inline(always)]
-    pub fn type_tag(&self) -> libc::uintptr_t {
-        self.header & (!15)
+    fn set_tag(&mut self, tag: u8) {
+        // TODO might need to change based on LSB/MSB
+        self.set_bits(0..TAG_BITS, tag as usize);
+    }
+
+    #[inline(always)]
+    fn marked(&self) -> bool {
+        self.get_bit(0)
+    }
+
+    #[inline(always)]
+    fn set_marked(&mut self, flag: bool) {
+        self.set_bit(0, flag);
+    }
+
+    #[inline(always)]
+    fn old(&self) -> bool {
+        self.get_bit(1)
+    }
+
+    #[inline(always)]
+    fn set_old(&mut self, flag: bool) {
+        self.set_bit(1, flag);
+    }
+}
+
+impl GcTag for AtomicUsize {
+    #[inline(always)]
+    fn tag(&self) -> usize {
+        self.load(Ordering::Relaxed).tag()
+    }
+
+    #[inline(always)]
+    fn set_tag(&mut self, tag: u8) {
+        self.get_mut().set_tag(tag)
+    }
+
+    #[inline(always)]
+    fn marked(&self) -> bool {
+        self.load(Ordering::Relaxed).marked()
+    }
+
+    #[inline(always)]
+    fn set_marked(&mut self, flag: bool) {
+        self.get_mut().set_marked(flag)
+    }
+
+    #[inline(always)]
+    fn old(&self) -> bool {
+        self.load(Ordering::Relaxed).old()
+    }
+
+    #[inline(always)]
+    fn set_old(&mut self, flag: bool) {
+        self.get_mut().set_old(flag)
     }
 }
 
@@ -540,7 +630,7 @@ impl<'a> Gc2<'a> {
     fn mark_remset(&self) {
       for item in &self.heap.last_remset { // TODO what
         let tag = unsafe { &*as_jltaggedvalue(*item) };
-        self.scan_obj(item, 0, tag.type_tag(), (tag.header & 0x0f) as u8);
+        self.scan_obj(item, 0, tag.type_tag(), tag.nontype_tag() as u8);
       }
 
       for item in &self.heap.rem_bindings {
@@ -615,11 +705,12 @@ impl<'a> Gc2<'a> {
     }
 
     fn gc_push_root(&self, e: &mut *mut JlValue, d: i32) -> i32 {
-        let o = unsafe { &*as_jltaggedvalue(*e as *const JlValue) };
-        let tag = o.header;
+        let o = unsafe { &mut *as_mut_jltaggedvalue(*e) };
+        let tag = o.read_header();
         if unsafe {!o.marked()} { // TODO
             let mut bits: u8 = 0;
-            if self.gc_setmark_tag(o, GC_MARKED, tag & 0x0f, &mut bits) {
+            let t = o.nontype_tag(); // do this because non-lexical borrows aren't there yet
+            if self.gc_setmark_tag(o, GC_MARKED, t, &mut bits) {
                 self.scan_obj(e, d, tag, bits);
             }
             return (bits & GC_OLD != 0) as i32;
@@ -627,9 +718,27 @@ impl<'a> Gc2<'a> {
         return ((tag as u8) & GC_OLD != 0) as i32;
     }
 
-    fn gc_setmark_tag(&self, o: &JlTaggedValue, mark_mode: u8, tag: usize, bits: &mut u8) -> bool {
-        // TODO!!!
-        return true;
+    fn gc_setmark_tag(&self, o: &mut JlTaggedValue, mark_mode: u8, tag: usize, bits: &mut u8) -> bool {
+        debug_assert!(! tag.marked());
+        debug_assert!((mark_mode as usize).marked());
+
+        let (tag, mark_mode) = if mark_reset_age != 0 {
+            // reset the object's age to young, as if it is just allocated
+            (tag | mark_mode as usize, GC_MARKED)
+        } else {
+            let mark_mode = if tag.old() {
+                GC_OLD_MARKED
+            } else {
+                mark_mode
+            };
+            debug_assert!(tag & 0x3 == mark_mode as usize);
+            (tag | mark_mode as usize, mark_mode)
+        };
+
+        *bits = mark_mode;
+        let old_tag = o.header.swap(tag, Ordering::Relaxed);
+        // TODO: verify_val(jl_valueof(o)) !!!
+        ! old_tag.marked()
     }
 
     fn gc_setmark_buf(&self) -> bool {

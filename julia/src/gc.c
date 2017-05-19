@@ -352,7 +352,7 @@ static size_t max_collect_interval =  500000000UL;
 // finalizer list to collect them the next time because the object is very
 // likely dead. This also won't break the GC invariance since these objects
 // are not reachable from anywhere else.
-static int mark_reset_age = 0;
+int mark_reset_age = 0;
 
 /*
  * The state transition looks like :
