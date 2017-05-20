@@ -8,6 +8,7 @@ use gc2::*;
 use libc::c_int;
 use libc::c_void;
 use libc::c_uint;
+use libc::c_char;
 use libc::uintptr_t;
 use libc;
 use pages::*;
@@ -18,6 +19,7 @@ use core::ops::DerefMut;
 use core;
 use bit_field::BitField;
 use std::sync::atomic;
+use std::ffi::CString;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -36,7 +38,28 @@ pub type JlJmpBuf = sigjmp_buf;
 // temporary, TODO: reify
 pub type JlValue = libc::c_void;
 pub type JlTask = libc::c_void;
-pub type JlModule = libc::c_void;
+pub type JlSym = libc::c_void;
+
+#[repr(C)]
+pub struct JlModule {
+    pub name: * mut JlSym,
+    pub parent: * mut JlModule,
+    pub bindings: HTable,
+    pub usings: JlArrayList, // modules with all bindings potentially imported
+    pub istopmod: u8,
+    pub uuid: u64,
+    pub counter: u32,
+}
+
+// Representations of internal hashtables used by Julia
+pub const HT_N_INLINE: usize = 32;
+
+#[repr(C)]
+pub struct HTable {
+    pub size: usize,
+    pub table: * mut * mut c_void,
+    pub _space: [* mut c_void; HT_N_INLINE],
+}
 
 // This is a marker trait for data structures that are allocated as JlValue, if
 // a data structure implements this then it promises its memory layout to be
@@ -53,7 +76,7 @@ pub trait JlValueLike {
     fn as_mut_jlvalue(&mut self) -> &mut JlValue;
 
     fn from_jlvalue(v: &JlValue) -> &Self;
-    
+
     fn from_jlvalue_mut(v: &mut JlValue) -> &mut Self;
 }
 
@@ -76,7 +99,7 @@ impl<T> JlValueLike for T where T: Sized+JlValueMarker {
             mem::transmute(v)
         }
     }
-    
+
     fn from_jlvalue_mut(v: &mut JlValue) -> &mut Self {
         unsafe {
             mem::transmute(v)
@@ -87,13 +110,19 @@ impl<T> JlValueLike for T where T: Sized+JlValueMarker {
 impl JlValueMarker for JlModule {
 }
 
-
-pub unsafe fn as_jltaggedvalue(v: * const JlValue) -> * const JlTaggedValue {
-    mem::transmute::<* const JlValue, * const JlTaggedValue>(v).offset(-1)
+impl JlValueMarker for JlTask {
 }
 
-pub unsafe fn as_mut_jltaggedvalue(v: * mut JlValue) -> * mut JlTaggedValue {
-    mem::transmute::<* mut JlValue, * mut JlTaggedValue>(v).offset(-1)
+pub fn as_jltaggedvalue(v: * const JlValue) -> * const JlTaggedValue {
+    unsafe {
+        mem::transmute::<* const JlValue, * const JlTaggedValue>(v).offset(-1)
+    }
+}
+
+pub fn as_mut_jltaggedvalue(v: * mut JlValue) -> * mut JlTaggedValue {
+    unsafe {
+        mem::transmute::<* mut JlValue, * mut JlTaggedValue>(v).offset(-1)
+    }
 }
 
 pub struct JlDatatypeLayout {
@@ -183,13 +212,19 @@ pub struct JlTypename {
     mt: *mut c_void, // struct _jl_methtable_t
 }
 
+#[derive(Clone)]
 #[repr(C)]
 pub struct JlArrayFlags {
     pub flags: u16 // how:2, ndims:10, pooled:1, ptarray:1, isshared:1, isaligned:1 TODO not sure about order
 }
 
 impl JlArrayFlags {
-    pub fn how(&self) -> u16 {self.flags.get_bits(0..1)}
+    pub fn how(&self) -> AllocStyle {
+        // following cast works because AllocStyle is represented as a u16!
+        unsafe {
+            mem::transmute::<u16, AllocStyle>(self.flags.get_bits(0..1))
+        }
+    }
     pub fn ndims(&self) -> u16 {self.flags.get_bits(2..11)}
     pub fn pooled(&self) -> u16 {self.flags.get_bits(12..12)}
     pub fn ptrarray(&self) -> bool {self.flags.get_bit(13)}
@@ -197,6 +232,8 @@ impl JlArrayFlags {
     pub fn isaligned(&self) -> bool {self.flags.get_bit(15)}
 }
 
+#[derive(PartialEq)]
+#[repr(u16)]
 pub enum AllocStyle {
     Inlined = 0,
     JlBuffer = 1,
@@ -242,22 +279,27 @@ impl JlArray {
     }
 
     #[inline(always)]
-    pub fn data_owner_offset(&self) -> usize {
-        mem::size_of::<JlArray>() + mem::size_of::<usize>() * (self.ndimwords())
+    pub fn data_owner_offset(&self) -> isize {
+        (mem::size_of::<JlArray>() + mem::size_of::<usize>() * (self.ndimwords())) as isize
     }
 
     #[inline(always)]
     pub fn data_owner_mut(&mut self) -> &mut JlValue {
         unsafe {
-            *((self as * mut u8).offset(self.data_owner_offset()) as * mut &mut JlValue)
+            *(mem::transmute::<* mut JlArray, * mut u8>(self as * mut JlArray).offset(self.data_owner_offset()) as * mut &mut JlValue)
         }
     }
-    
+
     #[inline(always)]
     pub fn data_owner(&self) -> &JlValue {
         unsafe {
-            *((self as * const u8).offset(self.data_owner_offset()) as * const &const JlValue)
+            *(mem::transmute::<* const JlArray, * const u8>(self as * const JlArray).offset(self.data_owner_offset()) as * const &JlValue)
         }
+    }
+
+    #[inline(always)]
+    pub fn ndimwords(&self) -> usize {
+        self.ndims().saturating_sub(2) as usize
     }
 }
 
@@ -280,6 +322,11 @@ extern {
     // set type of a value by setting the tag
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
     pub fn np_jl_svec_data(v: * mut JlValue) -> * mut * mut JlValue;
+    pub fn np_jl_field_isptr(st: * const JlDatatype, i: c_int) -> c_int;
+    pub fn np_jl_field_offset(st: * const JlDatatype, i: c_int) -> u32;
+    pub fn np_jl_symbol_name(sym: * const JlSym) -> * const c_char;
+
+    pub fn np_verify_parent(ty: * const c_char, o: * const JlValue, slot: * const * mut JlValue, msg: * const c_char);
 
     // list of global threads, declared in julia/src/threading.c
     pub static jl_n_threads: u32;
@@ -306,6 +353,27 @@ extern {
     pub static gc_verifying: libc::c_int;
 
     pub static mark_reset_age: libc::c_int;
+}
+
+
+#[inline(always)]
+pub unsafe fn verify_parent_<T: Into<Vec<u8>>>(ty: &str, o: * const JlValue, slot: &* mut JlValue, msg: T) {
+        np_verify_parent(CString::new(ty).unwrap().into_raw(),
+                         o,
+                         slot as * const * mut JlValue,
+                         CString::new(msg).unwrap().into_raw())
+}
+
+#[macro_export]
+#[cfg(gc_verify)]
+macro_rules! verify_parent {
+    ($ty: expr, $o: expr, $slot: expr, $msg: expr) => (verify_parent_($ty, $o, $slot, $msg));
+}
+
+#[macro_export]
+#[cfg(not(gc_verify))]
+macro_rules! verify_parent {
+    ($ty: expr, $o: expr, $slot: expr, $msg: expr) => ();
 }
 
 // Wrapper for getting all thread states in a safer manner by constructing a
@@ -372,6 +440,21 @@ pub struct JlArrayList {
     pub max: usize,
     pub items: *mut *mut c_void,
     pub _space: [*mut c_void; AL_N_INLINE],
+}
+
+// some helper methods for reading raw data from arraylists
+impl JlArrayList {
+    pub fn as_slice(&self) -> &[* mut c_void] {
+        unsafe {
+            slice::from_raw_parts(self.items, self.len)
+        }
+    }
+
+    pub fn as_slice_mut(&mut self) -> &mut [* mut c_void] {
+        unsafe {
+            slice::from_raw_parts_mut(self.items, self.len)
+        }
+    }
 }
 
 // Thread-local heap

@@ -17,7 +17,10 @@ extern crate threadpool;
 //mod tests;
 
 mod gc;
-mod gc2;
 mod pages;
 mod util;
+
+#[macro_use]
 pub mod c_interface;
+
+mod gc2;
