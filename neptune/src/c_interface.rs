@@ -51,6 +51,10 @@ pub trait JlValueLike {
     fn as_jlvalue(&self) -> &JlValue;
 
     fn as_mut_jlvalue(&mut self) -> &mut JlValue;
+
+    fn from_jlvalue(v: &JlValue) -> &Self;
+    
+    fn from_jlvalue_mut(v: &mut JlValue) -> &mut Self;
 }
 
 // Automatic derivation of JlValue casting for types that implement JlValueMarker
@@ -66,7 +70,23 @@ impl<T> JlValueLike for T where T: Sized+JlValueMarker {
             mem::transmute(self)
         }
     }
+
+    fn from_jlvalue(v: &JlValue) -> &Self {
+        unsafe {
+            mem::transmute(v)
+        }
+    }
+    
+    fn from_jlvalue_mut(v: &mut JlValue) -> &mut Self {
+        unsafe {
+            mem::transmute(v)
+        }
+    }
 }
+
+impl JlValueMarker for JlModule {
+}
+
 
 pub unsafe fn as_jltaggedvalue(v: * const JlValue) -> * const JlTaggedValue {
     mem::transmute::<* const JlValue, * const JlTaggedValue>(v).offset(-1)
@@ -172,9 +192,9 @@ impl JlArrayFlags {
     pub fn how(&self) -> u16 {self.flags.get_bits(0..1)}
     pub fn ndims(&self) -> u16 {self.flags.get_bits(2..11)}
     pub fn pooled(&self) -> u16 {self.flags.get_bits(12..12)}
-    pub fn ptrarray(&self) -> u16 {self.flags.get_bits(13..13)}
-    pub fn ishared(&self) -> u16 {self.flags.get_bits(14..14)}
-    pub fn isaligned(&self) -> u16 {self.flags.get_bits(15..15)}
+    pub fn ptrarray(&self) -> bool {self.flags.get_bit(13)}
+    pub fn ishared(&self) -> bool {self.flags.get_bit(14)}
+    pub fn isaligned(&self) -> bool {self.flags.get_bit(15)}
 }
 
 pub enum AllocStyle {
@@ -206,6 +226,38 @@ impl JlArray {
     #[inline(always)]
     pub fn set_ncols(&mut self, ncols: usize) {
         self.maxsize_ncols = ncols;
+    }
+
+    pub fn nbytes(&self) -> usize {
+        if self.ndims() == 1 {
+            self.elsize as usize * self.maxsize_ncols as usize + (self.elsize == 1) as usize
+        } else {
+            self.elsize as usize * self.length as usize
+        }
+    }
+
+    #[inline(always)]
+    pub fn ndims(&self) -> u16 {
+        self.flags.ndims()
+    }
+
+    #[inline(always)]
+    pub fn data_owner_offset(&self) -> usize {
+        mem::size_of::<JlArray>() + mem::size_of::<usize>() * (self.ndimwords())
+    }
+
+    #[inline(always)]
+    pub fn data_owner_mut(&mut self) -> &mut JlValue {
+        unsafe {
+            *((self as * mut u8).offset(self.data_owner_offset()) as * mut &mut JlValue)
+        }
+    }
+    
+    #[inline(always)]
+    pub fn data_owner(&self) -> &JlValue {
+        unsafe {
+            *((self as * const u8).offset(self.data_owner_offset()) as * const &const JlValue)
+        }
     }
 }
 

@@ -7,6 +7,7 @@ use bit_field::BitField;
 use alloc;
 use std::intrinsics;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::slice;
 
 const TAG_BITS: u8 = 2; // number of tag bits
 const GC_N_POOLS: usize = 41;
@@ -425,7 +426,7 @@ impl<'a> Gc2<'a> {
            finalizers: Vec::new(),
            finalizers_inhibited: 0,
            tls: tls,
-           allocd: 0,
+           allocd: 1 << 20,
         }
     }
 
@@ -449,9 +450,9 @@ impl<'a> Gc2<'a> {
         // TODO: make this better, currently we are collecting for every MB
         self.allocd -= allocsz as isize;
         if self.allocd < 0 {
-            // self.collect_small();
+            self.collect_small();
             self.allocd += 1 << 20;
-            // println!("collected everything");
+            println!("collected small");
         }
         let v = if allocsz <= GC_MAX_SZCLASS + mem::size_of::<JlTaggedValue>() {
             self.pool_alloc(allocsz)
@@ -667,51 +668,95 @@ impl<'a> Gc2<'a> {
             let data = unsafe { np_jl_svec_data(*v) };
             let l = unsafe { (*vec).length };
             nptr += 1;
-            let elements = unsafe { ::std::slice::from_raw_parts_mut(data, l as usize) };
+            let elements = unsafe { slice::from_raw_parts_mut(data, l as usize) };
             for e in elements {
                 // verify parent?
                 refyoung |= self.gc_push_root(e, d);
             }
             print!("Simple Vector Type!")
         } else if unsafe { (*vt).name == jl_array_typename } {
-            /*
-            // TODO
-            let a = v as *mut JlArray; // TODO
-            let flags = a.flags; // TODO
+            let a = unsafe {
+                &mut * mem::transmute::<*mut JlValue, *mut JlArray>(*v)
+            };
+            let flags = a.flags;
             if flags.how() == AllocStyle::HasOwnerPointer {
-                let owner = np_jl_data_owner(a); // TODO
+                let owner = np_jl_array_data_owner(a); // TODO
                 refyoung |= self.gc_push_root(owner, d);
             } else if flags.how() == AllocStyle::JlBuffer {
-                let val_buf = ??? // TODO
-                self.gc_setmark_buf(...) // TODO
+                let buf_ptr = (a.data as * mut u8).offset(- (a.offset as isize * a.elsize as isize));
+                let val_buf = unsafe {
+                    mem::transmute::<* mut u8, * mut JlValue>(buf_ptr).as_mut_jltaggedvalue()
+                };
+                verify_parent1("array", v, &val_buf, "buffer ('loc' addr is meaningless)");
+                // N.B. In C there is the statement `(void)val_buf` here for some reason.
+                self.gc_setmark_buf(buf_ptr, bits, a.nbytes());
             }
-            // TODO more!
-            */
 
-            print!("Array Type!")
+            if flags.ptrarray() && ! a.data.is_null() {
+                let l = a.length as usize;
+
+                if l > 100000 && d > MAX_MARK_DEPTH - 10 {
+                    // don't mark long arrays at hight depth to avoid copying
+                    // the whole array into the mark queue
+                    return self.queue_the_root();
+                } else {
+                    nptr += l;
+                    let data = slice::from_raw_parts(a.data as * const * mut JlValue, l);
+
+                    // queue elements for marking
+                    for i in 0..l {
+                        let elt = data[i];
+                        if ! elt.is_null() {
+                            // N.B. I'm not sure about the &elt part
+                            verify_parent2("array", v, &elt, "elem(%d)", i);
+                            refyoung |= self.gc_push_root(elt, d);
+                        }
+                    }
+                }
+            }
+            println!("Array Type!")
         } else if vt == jl_module_type {
-            /*
-            refyoung |= self.gc_mark_module
-            */
+            // should increase nptr here, according to Julia's GC implementation
+            refyoung |= self.gc_mark_module(JlModule::from_jlvalue_mut(*v), d, bits);
+            println!("Module Type!")
         } else if vt == jl_task_type {
-            // TODO
+            // same nptr increment thing
+            self.gc_mark_task(JlTask::from_jlvalue_mut(v), d, bits);
+            // tasks should always be remarked since Julia doesn't trigger the
+            // write barrier for stores to stack slots, it does so only for
+            // values on heap
+            refyoung = 1;
         } else {
-            // TODO
+            let nf = jl_datatype_nfields(vt);
+            let npointers = unsafe { (*(*vt).layout).npointers() };
+            nptr += (npointers & 0xff) as usize << (npointers & 0x300);
+
+            for i in 1..nf {
+                if jl_field_isptr(vt, i) {
+                    let slot = (*v as * mut u8).offset(jl_field_offset(vt, i)) as * mut * mut JlValue;
+                    let fld = unsafe { *slot };
+                    if ! fld.is_null() {
+                        verify_parent2("object", v, slot, "field(%d)", i);
+                        refyoung |= self.gc_push_root(fld, d);
+                    }
+                }
+            }
         }
 
+        // label 'ret:
         if bits == GC_OLD_MARKED && refyoung > 0 && ! get_gc_verifying() {
-            //self.heap.remset.push(v); // TODO again, I fight with Rust...
+            self.heap.remset.push(*v);
         }
     }
 
-    fn gc_push_root(&self, e: &mut *mut JlValue, d: i32) -> i32 {
-        let o = unsafe { &mut *as_mut_jltaggedvalue(*e) };
+    fn gc_push_root(&self, e: *mut JlValue, d: i32) -> i32 {
+        let o = unsafe { &mut *as_mut_jltaggedvalue(e) };
         let tag = o.read_header();
         if unsafe {!o.marked()} { // TODO
             let mut bits: u8 = 0;
             let t = o.nontype_tag(); // do this because non-lexical borrows aren't there yet
             if self.gc_setmark_tag(o, GC_MARKED, t, &mut bits) {
-                self.scan_obj(e, d, tag, bits);
+                self.scan_obj(&e, d, tag, bits);
             }
             return (bits & GC_OLD != 0) as i32;
         }
@@ -747,11 +792,25 @@ impl<'a> Gc2<'a> {
     }
 
     fn queue_the_root(&self) {
+        if mark_sp >= mark_stack_size {
+            grow_mark_stack();
+        }
 
+        mark_stack[mark_sp] = v;
+        mark_stack += 1;
     }
 
     fn mark_thread_local(&mut self) {
+        /*
+        self.tls.current_module.map(|m| {
+            self.gc_push_root(m, 0);
+        });
 
+        self.gc_push_root(self.tls.current_task.unwrap(), 0);
+        self.gc_push_root(self.tls.root_task.unwrap(), 0);
+        self.gc_push_root(self.exception_in_transit.unwrap(), 0);
+        self.gc_push_root(self.task_arg_in_transit.unwrap(), 0);
+         */
     }
 
     fn get_frames() {
@@ -816,7 +875,7 @@ impl<'a> Gc2<'a> {
                             let o = unsafe {
                                 mem::transmute::<&u8, &JlTaggedValue>(&page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
                             };
-                            if unsafe { o.marked() } {
+                            if unsafe { ! o.marked() } {
                                 nfree += 1;
                             }
                         }

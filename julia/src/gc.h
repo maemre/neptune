@@ -176,7 +176,7 @@ extern bigval_t *big_objects_marked;
 extern arraylist_t finalizer_list_marked;
 extern arraylist_t to_finalize;
 extern int64_t lazy_freed_pages;
-
+  
 STATIC_INLINE bigval_t *bigval_header(jl_taggedvalue_t *o)
 {
     return container_of(o, bigval_t, header);
