@@ -14,3 +14,9 @@
     a. implement and call root_free?
 * Other related to GC:
   1. work on thread destruction
+
+* Notes on differing data structures:
+** Mark stack
+   Julia GC has a single mark stack that it uses for marking. This is OK since Julia GC is effectively single-threaded. Neptune has one mark stack per Julia thread in thread-local state (TLS).
+** Thread pool
+   Neptune has a thread pool to parallelize sweeping.
