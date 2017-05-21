@@ -7,6 +7,7 @@ use std::env;
 use std::num;
 use c_interface::*;
 use threadpool::ThreadPool;
+use std::sync::atomic::*;
 
 // Errors that can be encountered during Gc initialization
 #[derive(Debug)]
@@ -118,15 +119,15 @@ pub struct PageMeta<'a> {
     // TODO: make following bools after transitioning to Rust
     pub has_marked: u8,   // whether any cell is marked in this page
     pub has_young:  u8,   // whether any live and young cells are in this page, before sweeping
-    pub nold:       u16,  // #old objects
+    pub nold:       AtomicU16,  // #old objects
     pub prev_nold:  u16,  // #old object during previous sweep
     pub nfree:      u16,  // #free objects, invalid if pool that owns this page is allocating from it
     pub osize:      u16,  // size of each object in this page
     pub fl_begin_offset: u16, // offset of the first free object
     pub fl_end_offset:   u16, // offset of the last free object
     pub thread_n: u16, // thread id of the heap that owns this page
-    pub data: Option<Box<&'a mut [u8]>>,
-    pub ages: Option<Box<&'a mut [u8]>>,
+    pub data: Option<Box<&'a mut [AtomicU8]>>,
+    pub ages: Option<Box<&'a mut [AtomicU8]>>,
 }
 
 impl<'a> PageMeta<'a> {
@@ -135,7 +136,7 @@ impl<'a> PageMeta<'a> {
             pool_n:     0,
             has_marked: 0,
             has_young:  0,
-            nold:       0,
+            nold:       AtomicU16::new(0),
             prev_nold:  0,
             nfree:      0,
             osize:      0,
@@ -282,6 +283,25 @@ impl BigVal {
     #[inline(always)]
     pub fn set_size(&mut self, size: usize) {
         self.szOrAge = size;
+    }
+
+    #[inline(always)]
+    pub fn age(&self) -> usize {
+        // subject to change based on endianness
+        self.szOrAge.get_bits(0..2)
+    }
+
+    #[inline(always)]
+    pub fn set_age(&mut self, age: usize) {
+        self.szOrAge.set_bits(0..2, age);
+    }
+
+    pub unsafe fn from_mut_jltaggedvalue(t: &mut JlTaggedValue) -> &mut Self {
+        &mut *mem::transmute::<* mut JlTaggedValue, * mut BigVal>(t).offset(-1)
+    }
+
+    pub unsafe fn from_jltaggedvalue(t: & JlTaggedValue) -> & Self {
+        &*mem::transmute::<* const JlTaggedValue, * const BigVal>(t).offset(-1)
     }
 }
 

@@ -37,8 +37,9 @@ pub type JlJmpBuf = sigjmp_buf;
 
 // temporary, TODO: reify
 pub type JlValue = libc::c_void;
-pub type JlTask = libc::c_void;
+pub type JlFunction = JlValue;
 pub type JlSym = libc::c_void;
+pub type JlHandler = libc::c_void;
 
 #[repr(C)]
 pub struct JlModule {
@@ -49,6 +50,59 @@ pub struct JlModule {
     pub istopmod: u8,
     pub uuid: u64,
     pub counter: u32,
+}
+
+#[repr(C)]
+pub struct JlTask {
+    pub parent: * mut JlTask,
+    pub tls: * mut JlValue,
+    pub state: * mut JlSym,
+    pub consumers: * mut JlValue,
+    pub donenotify: * mut JlValue,
+    pub result: * mut JlValue,
+    pub exception: * mut JlValue,
+    pub backtrace: * mut JlValue,
+    pub start: * mut JlFunction,
+    pub ctx: * mut JlJmpBuf,
+    pub bufsz: usize,
+    pub stkbuf: * mut c_void,
+
+    // hidden fields:
+    pub ssize: usize,
+    started: usize, // this is actually a bool
+
+    // current exception handler
+    pub eh: JlHandler,
+    // saved gc stack top for context switches
+    pub gcstack: * mut GcFrame,
+    // current module, or NULL if this task has not set one
+    pub current_module: * mut JlModule,
+    // current world age
+    pub world_age: usize,
+
+    // id of owning thread
+    // does not need to be defined until the task runs
+    pub tid: i16,
+    // This is statically initialized when the task is not holding any locks
+    pub locks: JlArrayList,
+    pub timing_stack: * mut JlTimingBlock,
+}
+
+#[cfg(debug_assertions)]
+pub struct JlTimingBlock { // typedef in julia.h
+    prev: * mut JlTimingBlock,
+    total: u64,
+    t0: u64,
+    owner: c_int,
+    running: u8,
+}
+
+#[cfg(not(debug_assertions))]
+pub struct JlTimingBlock { // typedef in julia.h
+    prev: * mut JlTimingBlock,
+    total: u64,
+    t0: u64,
+    owner: c_int,
 }
 
 // Representations of internal hashtables used by Julia
@@ -319,6 +373,8 @@ extern {
     // mark boxed caches, which don't contain any pointers hence are terminal nodes
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
 
+    pub fn gc_scrub_record_task(ta: * mut JlTask);
+
     // set type of a value by setting the tag
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
     pub fn np_jl_svec_data(v: * mut JlValue) -> * mut * mut JlValue;
@@ -491,8 +547,8 @@ pub struct JlTLS {
     pub disable_gc: u8,
     pub defer_signal: sig_atomic_t, // ???
     pub current_module: Option<&'static mut JlModule>,
-    pub current_task: Option<&'static mut JlTask>, // volatile
-    pub root_task: Option<&'static mut JlTask>,
+    pub current_task: * mut JlTask, // volatile
+    pub root_task: * mut JlTask,
     pub task_arg_in_transit: Option<&'static mut JlValue>, // volatile
     pub stackbase: *const c_void,
     pub stack_lo: *const u8,

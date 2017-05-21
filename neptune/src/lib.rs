@@ -8,6 +8,8 @@
 #![feature(core_intrinsics)]
 // for having atomic u16, u32 etc.
 #![feature(integer_atomics)]
+// for computing offsets between objects on a page
+#![feature(offset_to)]
 
 extern crate libc;
 extern crate bit_field;
