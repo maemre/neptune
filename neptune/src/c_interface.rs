@@ -405,6 +405,9 @@ extern {
     pub static jl_module_type: *const JlDatatype;
     pub static jl_task_type: *const JlDatatype;
 
+    pub static jl_main_module: * mut JlModule;
+    pub static jl_internal_main_module: * mut JlModule;
+    
     #[cfg(gc_verify)]
     pub static gc_verifying: libc::c_int;
 
@@ -540,7 +543,7 @@ pub struct JlTLS {
     pub world_age: usize,
     // using Option instead of Box for values that can be null
     // this works thanks to null pointer optimization in Rust
-    pub exception_in_transit: Option<&'static mut JlValue>,
+    pub exception_in_transit: * mut JlValue,
     pub safepoint: usize, // volatile, TODO: represent volatility
     pub gc_state: GcState, // volatile
     pub in_finalizer: u8, // volatile
@@ -549,7 +552,7 @@ pub struct JlTLS {
     pub current_module: Option<&'static mut JlModule>,
     pub current_task: * mut JlTask, // volatile
     pub root_task: * mut JlTask,
-    pub task_arg_in_transit: Option<&'static mut JlValue>, // volatile
+    pub task_arg_in_transit: * mut JlValue, // volatile
     pub stackbase: *const c_void,
     pub stack_lo: *const u8,
     pub stack_hi: *const u8,
@@ -777,12 +780,11 @@ pub extern fn neptune_big_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize) -> &
 }
 
 #[no_mangle]
-pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static JlTLS,
-                                               stack: &'static GcFrame) -> Box<Gc2<'a>> {
+pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static JlTLS) -> Box<Gc2<'a>> {
     let pg_mgr = unsafe {
         PAGE_MGR.as_mut().unwrap()
     };
-    Box::new(Gc2::new(tls, stack, pg_mgr))
+    Box::new(Gc2::new(tls, pg_mgr))
 }
 
 // Corresponds to _jl_gc_collect

@@ -3,7 +3,7 @@
 #define NEPTUNE 0xC60D
 
 // Thread-local initialization
-tl_gcs_t *neptune_init_thread_local_gc(jl_ptls_t ptls, struct _jl_gcframe_t *pgcstack);
+tl_gcs_t *neptune_init_thread_local_gc(jl_ptls_t ptls);
 
 // Allocator entry points
 jl_value_t *neptune_alloc(tl_gcs_t * gc, size_t sz, void *typ);

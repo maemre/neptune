@@ -92,13 +92,11 @@ impl JlTaggedValue {
         mem::transmute(self)
     }
     // this is bits in Julia
-    pub unsafe fn tag(&self) -> usize {
-        // TODO might need to change based on LSB/MSB
+    pub fn tag(&self) -> usize {
         self.header.tag()
     }
     // this will panic if one tries to set bits higher than lowest TAG_BITS bits
-    pub unsafe fn set_tag(&mut self, tag: u8) {
-        // TODO might need to change based on LSB/MSB
+    pub fn set_tag(&mut self, tag: u8) {
         self.header.set_tag(tag);
     }
 
@@ -390,8 +388,6 @@ pub struct Gc2<'a> {
     pg_mgr: &'a mut PageMgr,
     // mark cache for thread-local marks
     cache: GcMarkCache,
-    // Stack for GC roots
-    gc_stack: &'static GcFrame,
     // Age of the world, used for promotion
     world_age: usize,
     // State of GC for this thread; TODO possibly move some back (not using most)
@@ -412,12 +408,11 @@ pub struct Gc2<'a> {
 }
 
 impl<'a> Gc2<'a> {
-    pub fn new(tls: &'static JlTLS, stack: &'static GcFrame, pg_mgr: &'a mut PageMgr) -> Self {
+    pub fn new(tls: &'static JlTLS, pg_mgr: &'a mut PageMgr) -> Self {
        Gc2 {
            heap: ThreadHeap::new(),
            pg_mgr: pg_mgr,
            cache: GcMarkCache::new(),
-           gc_stack: stack,
            world_age: 0,
            gc_state: GcState::Safe,
            in_finalizer: false,
@@ -1051,16 +1046,17 @@ impl<'a> Gc2<'a> {
     }
 
     fn mark_thread_local(&mut self) {
-        /*
         self.tls.current_module.map(|m| {
-            self.gc_push_root(m, 0);
+            self.gc_push_root(m.as_mut_jlvalue(), 0);
         });
 
-        self.gc_push_root(self.tls.current_task.unwrap(), 0);
-        self.gc_push_root(self.tls.root_task.unwrap(), 0);
-        self.gc_push_root(self.exception_in_transit.unwrap(), 0);
-        self.gc_push_root(self.task_arg_in_transit.unwrap(), 0);
-         */
+        unsafe {
+            // TODO: make these tasks options and push them if they aren't null
+            self.gc_push_root((&mut *self.tls.current_task).as_mut_jlvalue(), 0);
+            self.gc_push_root((&mut *self.tls.root_task).as_mut_jlvalue(), 0);
+        }
+        self.gc_push_root(self.tls.exception_in_transit, 0);
+        self.gc_push_root(self.tls.task_arg_in_transit, 0);
     }
 
     #[inline(always)]
@@ -1088,22 +1084,52 @@ impl<'a> Gc2<'a> {
         // TODO: move marked big objects in cache to big_object marked
     }
 
-    fn get_frames() {
-
-    }
-
     fn mark_roots(&mut self) {
+        // modules
+        self.gc_push_root(jl_main_module, 0);
+        self.gc_push_root(jl_internal_main_module, 0);
 
+        // invisible builtin values
+        if ! jl_an_empty_vec_any.is_null() {
+            self.gc_push_root(jl_an_empty_vec_any, 0);
+        }
+        if ! jl_module_init_order.is_null() {
+            self.gc_push_root(jl_module_init_order, 0);
+        }
+        self.gc_push_root(jl_cfunction_list.unknown, 0);
+        self.gc_push_root(jl_anytuple_type_type, 0);
+        self.gc_push_root(jl_ANY_flag, 0);
+
+        for i in 0..N_CALL_CACHE {
+            if call_cache[i] {
+                self.gc_push_root(call_cache[i], 0);
+            }
+        }
+
+        if ! jl_all_methods.is_null() {
+            self.gc_push_root(jl_all_methods, 0);
+        }
+
+        // constants
+        self.gc_push_root(jl_typetype_type, 0);
+        self.gc_push_root(jl_emptytuple_type, 0);
     }
 
     fn visit_mark_stack(&mut self) {
+        while ! self.mark_stack.empty() && ! should_timeout() {
+            let v = self.mark_stack.pop().unwrap();
+            let header = as_jltaggedvalue(v).read_header();
+            debug_assert_ne!(header, 0);
 
+            self.scan_obj3(&v, 0, header);
+        }
+        debug_assert!(mark_stack.empty());
     }
 
-    /*
-    pub fn mark<>
-    */
-
+    #[inline(always)]
+    fn scan_obj3(&mut self, v: &* mut JlValue, d: i32, tag: usize) {
+        self.scan_obj(v, d, tag & !15, (tag & 0xf) as u8);
+    }
 
     // sweep the object pool memory page by page.
     //
@@ -1270,5 +1296,6 @@ impl<'a> Gc2<'a> {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_remset(full);
         }
+        // TODO: sweep finalizer list
     }
 }
