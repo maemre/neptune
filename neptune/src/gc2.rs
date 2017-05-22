@@ -400,7 +400,7 @@ pub struct Gc2<'a> {
     finalizers_inhibited: libc::c_int,
     // parent pointer to thread-local storage for other fields, if necessary
     // we can access stack base etc. from here (?)
-    tls: &'static JlTLS,
+    tls: &'static mut JlTLS,
     // amount of allocation till next collection
     allocd: isize,
     // mark stack for marking on this thread
@@ -408,7 +408,7 @@ pub struct Gc2<'a> {
 }
 
 impl<'a> Gc2<'a> {
-    pub fn new(tls: &'static JlTLS, pg_mgr: &'a mut PageMgr) -> Self {
+    pub fn new(tls: &'static mut JlTLS, pg_mgr: &'a mut PageMgr) -> Self {
        Gc2 {
            heap: ThreadHeap::new(),
            pg_mgr: pg_mgr,
@@ -1046,17 +1046,21 @@ impl<'a> Gc2<'a> {
     }
 
     fn mark_thread_local(&mut self) {
-        self.tls.current_module.map(|m| {
-            self.gc_push_root(m.as_mut_jlvalue(), 0);
-        });
-
+        if ! self.tls.current_module.is_null() {
+            unsafe {
+                self.gc_push_root((* self.tls.current_module).as_mut_jlvalue(), 0);
+            }
+        }
+        
         unsafe {
             // TODO: make these tasks options and push them if they aren't null
             self.gc_push_root((&mut *self.tls.current_task).as_mut_jlvalue(), 0);
             self.gc_push_root((&mut *self.tls.root_task).as_mut_jlvalue(), 0);
         }
-        self.gc_push_root(self.tls.exception_in_transit, 0);
-        self.gc_push_root(self.tls.task_arg_in_transit, 0);
+        let exn = self.tls.exception_in_transit.clone();
+        self.gc_push_root(exn, 0);
+        let ta = self.tls.task_arg_in_transit.clone();
+        self.gc_push_root(ta, 0);
     }
 
     #[inline(always)]
@@ -1086,44 +1090,49 @@ impl<'a> Gc2<'a> {
 
     fn mark_roots(&mut self) {
         // modules
-        self.gc_push_root(jl_main_module, 0);
-        self.gc_push_root(jl_internal_main_module, 0);
+        self.gc_push_root(unsafe { (*jl_main_module).as_mut_jlvalue() }, 0);
+        self.gc_push_root(unsafe { (*jl_internal_main_module).as_mut_jlvalue() }, 0);
 
         // invisible builtin values
         if ! jl_an_empty_vec_any.is_null() {
             self.gc_push_root(jl_an_empty_vec_any, 0);
         }
         if ! jl_module_init_order.is_null() {
-            self.gc_push_root(jl_module_init_order, 0);
+            self.gc_push_root(unsafe { (*jl_module_init_order).as_mut_jlvalue() }, 0);
         }
-        self.gc_push_root(jl_cfunction_list.unknown, 0);
-        self.gc_push_root(jl_anytuple_type_type, 0);
+        self.gc_push_root(unsafe { (*jl_cfunction_list).unknown }, 0);
+        self.gc_push_root(unsafe { (*jl_anytuple_type_type).as_mut_jlvalue() }, 0);
         self.gc_push_root(jl_ANY_flag, 0);
 
         for i in 0..N_CALL_CACHE {
-            if call_cache[i] {
+            if ! call_cache[i].is_null() {
                 self.gc_push_root(call_cache[i], 0);
             }
         }
 
         if ! jl_all_methods.is_null() {
-            self.gc_push_root(jl_all_methods, 0);
+            self.gc_push_root(unsafe { (*jl_all_methods).as_mut_jlvalue() }, 0);
         }
 
         // constants
-        self.gc_push_root(jl_typetype_type, 0);
-        self.gc_push_root(jl_emptytuple_type, 0);
+        self.gc_push_root(unsafe { (*jl_typetype_type).as_mut_jlvalue() }, 0);
+        self.gc_push_root(unsafe { (*jl_emptytuple_type).as_mut_jlvalue() }, 0);
+    }
+
+    #[inline(always)]
+    fn should_timeout() -> bool {
+        false
     }
 
     fn visit_mark_stack(&mut self) {
-        while ! self.mark_stack.empty() && ! should_timeout() {
+        while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
             let v = self.mark_stack.pop().unwrap();
-            let header = as_jltaggedvalue(v).read_header();
+            let header = unsafe { &*as_jltaggedvalue(v) }.read_header();
             debug_assert_ne!(header, 0);
 
             self.scan_obj3(&v, 0, header);
         }
-        debug_assert!(mark_stack.empty());
+        debug_assert!(self.mark_stack.is_empty());
     }
 
     #[inline(always)]

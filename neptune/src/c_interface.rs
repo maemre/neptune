@@ -35,11 +35,13 @@ pub struct sigjmp_buf {
 
 pub type JlJmpBuf = sigjmp_buf;
 
-// temporary, TODO: reify
 pub type JlValue = libc::c_void;
 pub type JlFunction = JlValue;
+
+// temporary, TODO: reify
 pub type JlSym = libc::c_void;
 pub type JlHandler = libc::c_void;
+pub type JlTypeMapEntry = libc::c_void;
 
 #[repr(C)]
 pub struct JlModule {
@@ -88,6 +90,26 @@ pub struct JlTask {
     pub timing_stack: * mut JlTimingBlock,
 }
 
+#[repr(C)]
+pub struct JlTVar {
+    name: * mut JlSym,
+    lb: * mut JlValue,
+    ub: * mut JlValue,
+}
+
+impl JlValueMarker for JlTVar {
+}
+
+#[repr(C)]
+pub struct JlUnionAll {
+    var: * mut JlTVar,
+    body: * mut JlValue,
+}
+
+impl JlValueMarker for JlUnionAll {
+}
+
+#[repr(C)]
 #[cfg(debug_assertions)]
 pub struct JlTimingBlock { // typedef in julia.h
     prev: * mut JlTimingBlock,
@@ -97,6 +119,7 @@ pub struct JlTimingBlock { // typedef in julia.h
     running: u8,
 }
 
+#[repr(C)]
 #[cfg(not(debug_assertions))]
 pub struct JlTimingBlock { // typedef in julia.h
     prev: * mut JlTimingBlock,
@@ -179,6 +202,23 @@ pub fn as_mut_jltaggedvalue(v: * mut JlValue) -> * mut JlTaggedValue {
     }
 }
 
+// Note: this is actually a union with the shape:
+//
+// ```
+// union jl_typemap_t {
+//     struct _jl_typemap_level_t *node;
+//     struct _jl_typemap_entry_t *leaf;
+//     struct _jl_value_t *unknown; // nothing
+// };
+// ```
+//
+// We can add accessors to other interpretations of this union later
+// on if necessary.
+#[repr(C)]
+pub struct JlTypeMap {
+    pub unknown: * mut JlValue,
+}
+
 pub struct JlDatatypeLayout {
     pub nfields: u32,
     bits: u32, // these will correspond to the bitfields
@@ -233,6 +273,7 @@ pub struct JlSVec {
 }
 
 // Might not be correct, might be needed, might be incomplete
+#[repr(C)]
 pub struct JlDatatype {
     //JL_DATA_TYPE
     pub name: *const JlTypename,
@@ -252,6 +293,9 @@ pub struct JlDatatype {
     pub depth: u32,
     pub hasfreetypevars: u8,
     pub isleaftype: u8,
+}
+
+impl JlValueMarker for JlDatatype {
 }
 
 pub struct JlTypename {
@@ -357,6 +401,9 @@ impl JlArray {
     }
 }
 
+impl JlValueMarker for JlArray {
+}
+
 // this is actually just the tag
 pub struct JlTaggedValue {
     pub header: atomic::AtomicUsize
@@ -366,6 +413,8 @@ pub struct JlTaggedValue {
 // ACHTUNG: update this if JlTaggedValue is ever changed!
 pub const SIZE_OF_JLTAGGEDVALUE: usize = 8;
 
+pub const N_CALL_CACHE: usize = 4096; // from options.h
+
 extern {
     pub fn gc_final_count_page(pg_cnt: usize);
     pub fn jl_gc_wait_for_the_world(); // wait for the world to stop
@@ -373,6 +422,7 @@ extern {
     // mark boxed caches, which don't contain any pointers hence are terminal nodes
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
 
+    #[cfg(gc_debug_env)]
     pub fn gc_scrub_record_task(ta: * mut JlTask);
 
     // set type of a value by setting the tag
@@ -404,16 +454,32 @@ extern {
     pub static jl_typename: *const JlTypename;
     pub static jl_module_type: *const JlDatatype;
     pub static jl_task_type: *const JlDatatype;
+    pub static jl_emptytuple_type: * mut JlDatatype;
 
     pub static jl_main_module: * mut JlModule;
     pub static jl_internal_main_module: * mut JlModule;
+
+    pub static jl_typetype_type: * mut JlUnionAll;
+    pub static jl_anytuple_type_type: * mut JlUnionAll;
+    pub static jl_all_methods: * mut JlArray;
+    pub static jl_module_init_order: * mut JlArray;
+
+    pub static jl_cfunction_list: * mut JlTypeMap;
+    pub static jl_an_empty_vec_any: * mut JlValue;
+    pub static jl_ANY_flag: * mut JlValue;
     
     #[cfg(gc_verify)]
     pub static gc_verifying: libc::c_int;
 
     pub static mark_reset_age: libc::c_int;
+
+    pub static call_cache: [* mut JlTypeMapEntry; N_CALL_CACHE];
 }
 
+#[inline(always)]
+#[cfg(not(gc_debug_env))]
+pub fn gc_scrub_record_task(t: * mut JlTask) {
+}
 
 #[inline(always)]
 pub unsafe fn verify_parent_<T: Into<Vec<u8>>>(ty: &str, o: * const JlValue, slot: &* mut JlValue, msg: T) {
@@ -549,7 +615,7 @@ pub struct JlTLS {
     pub in_finalizer: u8, // volatile
     pub disable_gc: u8,
     pub defer_signal: sig_atomic_t, // ???
-    pub current_module: Option<&'static mut JlModule>,
+    pub current_module: * mut JlModule,
     pub current_task: * mut JlTask, // volatile
     pub root_task: * mut JlTask,
     pub task_arg_in_transit: * mut JlValue, // volatile
@@ -780,7 +846,7 @@ pub extern fn neptune_big_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize) -> &
 }
 
 #[no_mangle]
-pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static JlTLS) -> Box<Gc2<'a>> {
+pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static mut JlTLS) -> Box<Gc2<'a>> {
     let pg_mgr = unsafe {
         PAGE_MGR.as_mut().unwrap()
     };
