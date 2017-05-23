@@ -473,7 +473,7 @@ extern {
     pub static jl_all_methods: * mut JlArray;
     pub static jl_module_init_order: * mut JlArray;
 
-    pub static jl_cfunction_list: * mut JlTypeMap;
+    pub static jl_cfunction_list: JlTypeMap;
     pub static jl_an_empty_vec_any: * mut JlValue;
     pub static jl_ANY_flag: * mut JlValue;
     

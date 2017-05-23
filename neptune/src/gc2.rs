@@ -785,7 +785,6 @@ impl<'a> Gc2<'a> {
                 }
                 i += 1;
             }
-            println!("Simple Vector Type!")
         } else if unsafe { (*vt).name == jl_array_typename } {
             let a = unsafe {
                 &mut * mem::transmute::<*mut JlValue, *mut JlArray>(*v)
@@ -832,11 +831,9 @@ impl<'a> Gc2<'a> {
                     }
                 }
             }
-            println!("Array Type!")
         } else if vt == jl_module_type {
             // should increase nptr here, according to Julia's GC implementation
             refyoung |= self.mark_module(JlModule::from_jlvalue_mut(unsafe { &mut **v }), d, bits);
-            println!("Module Type!")
         } else if vt == jl_task_type {
             // same nptr increment thing
             self.gc_mark_task(JlTask::from_jlvalue_mut(unsafe { &mut **v }), d, bits);
@@ -1306,7 +1303,8 @@ impl<'a> Gc2<'a> {
         if ! jl_module_init_order.is_null() {
             self.push_root(unsafe { (*jl_module_init_order).as_mut_jlvalue() }, 0);
         }
-        self.push_root(unsafe { (*jl_cfunction_list).unknown }, 0);
+        let f = unsafe { jl_cfunction_list.unknown };
+        self.push_root(f, 0);
         self.push_root(unsafe { (*jl_anytuple_type_type).as_mut_jlvalue() }, 0);
         self.push_root(jl_ANY_flag, 0);
 
