@@ -272,12 +272,12 @@ impl BigVal {
 // list of malloc'd arrays
 #[repr(C)]
 pub struct MallocArray {
-    a: Box<JlArray>,
-    next: Option<Box<MallocArray>>
+    pub a:* mut JlArray,
+    pub next: Option<Box<MallocArray>>
 }
 
 impl MallocArray {
-    pub fn new(a: Box<JlArray>) -> Self {
+    pub fn new(a:* mut JlArray) -> Self {
         MallocArray {
             a: a,
             next: None,

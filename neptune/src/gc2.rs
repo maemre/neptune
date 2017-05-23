@@ -397,11 +397,11 @@ impl<'a> PageMeta<'a> {
             None => Box::new(Vec::with_capacity(n_ages)),
             Some(mut ages) => {
                 let capacity = ages.capacity();
-                
+
                 if capacity < n_ages {
                     ages.reserve_exact(n_ages - capacity);
                 }
-                
+
                 ages.clear();
                 ages
             }
@@ -409,11 +409,11 @@ impl<'a> PageMeta<'a> {
         for i in 0..n_ages - 1 {
             (*ages).push(AtomicU8::new(0));
         }
-        
+
         ages.shrink_to_fit(); // TODO: if this becomes a performance hog, we can drop it
-        
+
         self.ages = Some(ages);
-        
+
         let size = mem::size_of::<JlTaggedValue>() + self.osize as usize;
         // size of the data portion of the page, after aligning to 16 bytes after each tag
         let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;
@@ -692,11 +692,13 @@ impl<'a> Gc2<'a> {
     // keep track of array with malloc'd storage
     pub fn track_malloced_array(&mut self, a: * mut JlArray) {
         // N.B. This is *NOT* a GC safepoint due to heap mutation!!!
-        // TODO: use mafreelist first
-        self.heap.mallocarrays.push(MallocArray::new(unsafe { Box::from_raw(a) }));
+        debug_assert_eq!(unsafe { (*a).flags.how() }, AllocStyle::MallocBuffer);
+        self.heap.mallocarrays.push(MallocArray::new(a));
     }
 
     pub fn collect(&mut self, full: bool) -> bool {
+        let t0 = hrtime();
+
         // julia's gc.c does the following:
         // 1. fix GC bits of objects in the memset
         // 2.1 mark every object in the last_remsets and rem_binding
@@ -714,8 +716,37 @@ impl<'a> Gc2<'a> {
         self.visit_mark_stack();
 
         self.sweep(full);
+
+        self.writeback_stats(t0, full);
+
         false
     }
+
+    #[inline(always)]
+    fn writeback_stats(&mut self, t0: u64, full: bool) {
+        let gc_end_t = hrtime();
+        let pause = gc_end_t - t0;
+        unsafe {
+            gc_final_pause_end(t0, gc_end_t);
+        }
+        // Gc2::time_sweep_pause(gc_end_t, actual_allocd, live_bytes, estimate_freed, full);
+        Gc2::time_sweep_pause(gc_end_t, 0, 0, 0, full);
+        // update gc_num stats here
+    }
+
+    #[cfg(gc_time)]
+    #[inline(always)]
+    fn time_sweep_pause(gc_end_t: u64, actual_allocd: i64, live_bytes: i64, estimate_freed: i64, sweep_full: bool) {
+        unsafe {
+            gc_time_sweep_pause(gc_end_t, actual_allocd, live_bytes, estimate_freed, sweep_full as libc::c_int);
+        }
+    }
+
+    #[cfg(not(gc_time))]
+    #[inline(always)]
+    fn time_sweep_pause(gc_end_t: u64, actual_allocd: i64, live_bytes: i64, estimate_freed: i64, sweep_full: bool) {
+    }
+
 
     fn premark(&mut self) {
       mem::swap(&mut self.heap.remset, &mut self.heap.last_remset);
@@ -763,7 +794,7 @@ impl<'a> Gc2<'a> {
         if unsafe { (*(*vt).layout).npointers() == 0 } {
             return; // fast path for pointerless types
         }
-        
+
         d += 1;
         if d >= MAX_MARK_DEPTH {
             // queue the root
@@ -902,11 +933,11 @@ impl<'a> Gc2<'a> {
         if vtref == jl_simplevector_type {
             let vec = v as * const JlSVec;
             let l = unsafe { (*vec).length };
-            
+
             unsafe {
                 self.setmark(o, bits, l * mem::size_of::<* const libc::c_void>() + mem::size_of::<JlSVec>());
             }
-            
+
         } else if vt.name == jl_array_typename {
             let a = unsafe { &*(v as * const JlArray) };
             let ref flags = a.flags;
@@ -921,7 +952,7 @@ impl<'a> Gc2<'a> {
 
             if flags.how() == AllocStyle::MallocBuffer {
                 // array is malloc'd
-                
+
                 // In C:
                 // objprofile_count(jl_malloc_tag, bits == GC_OLD_MARKED, a.nbytes())
 
@@ -962,7 +993,7 @@ impl<'a> Gc2<'a> {
             }
         }
     }
-    
+
     fn setmark_tag(&self, o: &mut JlTaggedValue, mark_mode: u8, tag: usize, bits: &mut u8) -> bool {
         debug_assert!(! tag.marked());
         debug_assert!((mark_mode as usize).marked(), format!("Found mark_mode {} rather than a marked one", mark_mode));
@@ -1079,7 +1110,7 @@ impl<'a> Gc2<'a> {
             self.setmark_big(o, mark_mode);
         }
     }
-    
+
     fn mark_module(&mut self, m: &mut JlModule, d: i32, bits: u8) -> i32 {
         let mut i = 0;
         let mut refyoung = 0;
@@ -1094,7 +1125,7 @@ impl<'a> Gc2<'a> {
                 i += 2;
                 continue;
             }
-            
+
             let b = unsafe {
                 JlBinding::from_jlvalue_mut(&mut *table[i])
             };
@@ -1255,7 +1286,7 @@ impl<'a> Gc2<'a> {
                 self.push_root((* self.tls.current_module).as_mut_jlvalue(), 0);
             }
         }
-        
+
         unsafe {
             self.push_root((&mut *self.tls.current_task).as_mut_jlvalue(), 0);
             self.push_root((&mut *self.tls.root_task).as_mut_jlvalue(), 0);
@@ -1349,7 +1380,7 @@ impl<'a> Gc2<'a> {
             pool.clear_freelist();
         }
     }
-    
+
     // sweep the object pool memory page by page.
     //
     // N.B. in this code, a "chunk" refers to 32 contiguous pages that
@@ -1505,17 +1536,89 @@ impl<'a> Gc2<'a> {
         }
     }
 
+    fn sweep_malloced_arrays(&mut self) {
+        // gc_time_mallocd_array_start()
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * (*t).tl_gcs };
+            tl_gc.sweep_local_malloced_arrays();
+        }
+        // gc_time_mallocd_array_end()
+    }
+
+    fn sweep_local_malloced_arrays(&mut self) {
+        let ref mut ma = self.heap.mallocarrays;
+
+        let mut end = ma.len();
+        let mut i = 0;
+        while i < end {
+            let tag = unsafe {
+                &*as_jltaggedvalue((&*ma[i].a).as_jlvalue())
+            };
+
+            if ! tag.marked() {
+                let a = unsafe {
+                    &mut *ma.swap_remove(i).a
+                };
+                debug_assert_eq!(a.flags.how(), AllocStyle::MallocBuffer);
+                Gc2::free_array(a);
+                end -= 1;
+            } else {
+                i += 1;
+            }
+
+            // gc_time_count_mallocd_array(tag.tag())
+        }
+    }
+
+    fn free_array(a: &mut JlArray) {
+        if a.flags.how() == AllocStyle::MallocBuffer {
+            let d = unsafe {
+                (a.data as * mut u8).offset(- (a.offset as isize * a.elsize as isize)) as * mut libc::c_void
+            };
+
+            // if a.flags().isaligned() {
+            //     free_aligned(d);
+            // } else {
+            //     unsafe {
+            //         libc::free(d);
+            //     }
+            // }
+            unsafe {
+                libc::free(d); // on POSIX both cases compile down to free(3)
+            }
+        }
+    }
+
     fn sweep(&mut self, full: bool) {
+
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_weakrefs();
         }
-        self.sweep_pools(full);
+
+        println!("sweeping malloc'd arrays");
+        self.sweep_malloced_arrays();
+
+        println!("sweeping bigvals");
         self.sweep_bigvals(full);
+        /*
+        println!("scrubbing");
+        self.scrub();
+
+        println!("verifying tags");
+        self.verify_tags();
+        */
+        println!("sweeping pools");
+        self.sweep_pools(full);
+
+        println!("sweeping remsets");
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_remset(full);
         }
+
         // TODO: sweep finalizer list
+
+        println!("sweep done")
     }
 }

@@ -327,7 +327,7 @@ impl JlArrayFlags {
     pub fn how(&self) -> AllocStyle {
         // following cast works because AllocStyle is represented as a u16!
         unsafe {
-            mem::transmute::<u16, AllocStyle>(self.flags.get_bits(0..1))
+            mem::transmute::<u16, AllocStyle>(self.flags.get_bits(0..2))
         }
     }
     pub fn ndims(&self) -> u16 {self.flags.get_bits(2..11)}
@@ -337,7 +337,7 @@ impl JlArrayFlags {
     pub fn isaligned(&self) -> bool {self.flags.get_bit(15)}
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 #[repr(u16)]
 pub enum AllocStyle {
     Inlined = 0,
@@ -424,7 +424,11 @@ pub const N_CALL_CACHE: usize = 4096; // from options.h
 
 extern {
     pub fn gc_final_count_page(pg_cnt: usize);
+    pub fn gc_final_pause_end(t0: u64, tend: u64);
+    pub fn gc_time_sweep_pause(gc_end_t: u64, actual_allocd: i64, live_bytes: i64, estimate_freed: i64, sweep_full: c_int);
     pub fn jl_gc_wait_for_the_world(); // wait for the world to stop
+
+    pub fn jl_hrtime() -> u64;
 
     // mark boxed caches, which don't contain any pointers hence are terminal nodes
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
@@ -476,13 +480,18 @@ extern {
     pub static jl_cfunction_list: JlTypeMap;
     pub static jl_an_empty_vec_any: * mut JlValue;
     pub static jl_ANY_flag: * mut JlValue;
-    
+
     #[cfg(gc_verify)]
     pub static gc_verifying: libc::c_int;
 
     pub static mark_reset_age: libc::c_int;
 
     pub static call_cache: [* mut JlTypeMapEntry; N_CALL_CACHE];
+}
+
+#[inline(always)]
+pub fn hrtime() -> u64 {
+    unsafe { jl_hrtime() }
 }
 
 #[inline(always)]
