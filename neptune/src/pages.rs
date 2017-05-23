@@ -2,6 +2,7 @@
 // TODO: explain allocation scheme
 
 use gc::*;
+use gc2::*;
 use c_interface::*;
 use libc;
 use std::mem;

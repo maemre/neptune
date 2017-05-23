@@ -769,22 +769,6 @@ static void sweep_big(jl_ptls_t ptls, int sweep_full)
 
 // tracking Arrays with malloc'd storage
 
-void jl_gc_track_malloced_array(jl_ptls_t ptls, jl_array_t *a)
-{
-    // This is **NOT** a GC safe point.
-    mallocarray_t *ma;
-    if (ptls->heap.mafreelist == NULL) {
-        ma = (mallocarray_t*)malloc(sizeof(mallocarray_t));
-    }
-    else {
-        ma = ptls->heap.mafreelist;
-        ptls->heap.mafreelist = ma->next;
-    }
-    ma->a = a;
-    ma->next = ptls->heap.mallocarrays;
-    ptls->heap.mallocarrays = ma;
-}
-
 void jl_gc_count_allocd(size_t sz)
 {
     // This is **NOT** a GC safe point.

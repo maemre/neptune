@@ -138,6 +138,13 @@ pub struct HTable {
     pub _space: [* mut c_void; HT_N_INLINE],
 }
 
+impl HTable {
+    #[inline(always)]
+    pub fn is_not_found(entry: * mut c_void) -> bool {
+        entry as usize == 1
+    }
+}
+
 // This is a marker trait for data structures that are allocated as JlValue, if
 // a data structure implements this then it promises its memory layout to be
 // same as a JlValue and promises that it has a tag for GC, runtime type tag
@@ -266,7 +273,7 @@ impl JlDatatypeLayout {
     }
 }
 
-// TODO
+#[repr(C)]
 pub struct JlSVec {
     //JL_DATA_TYPE
     pub length: usize,
@@ -324,7 +331,7 @@ impl JlArrayFlags {
         }
     }
     pub fn ndims(&self) -> u16 {self.flags.get_bits(2..11)}
-    pub fn pooled(&self) -> u16 {self.flags.get_bits(12..12)}
+    pub fn pooled(&self) -> bool {self.flags.get_bit(12)}
     pub fn ptrarray(&self) -> bool {self.flags.get_bit(13)}
     pub fn ishared(&self) -> bool {self.flags.get_bit(14)}
     pub fn isaligned(&self) -> bool {self.flags.get_bit(15)}
@@ -432,6 +439,7 @@ extern {
     pub fn np_jl_field_offset(st: * const JlDatatype, i: c_int) -> u32;
     pub fn np_jl_symbol_name(sym: * const JlSym) -> * const c_char;
 
+    pub fn np_corruption_fail(vt: * mut JlDatatype) -> !;
     pub fn np_verify_parent(ty: * const c_char, o: * const JlValue, slot: * const * mut JlValue, msg: * const c_char);
 
     // list of global threads, declared in julia/src/threading.c
@@ -452,9 +460,10 @@ extern {
     pub static jl_simplevector_type: *const JlDatatype;
     pub static jl_array_typename: *const JlTypename;
     pub static jl_typename: *const JlTypename;
-    pub static jl_module_type: *const JlDatatype;
-    pub static jl_task_type: *const JlDatatype;
+    pub static jl_module_type: * const JlDatatype;
+    pub static jl_task_type: * const JlDatatype;
     pub static jl_emptytuple_type: * mut JlDatatype;
+    pub static jl_datatype_type: * mut JlDatatype;
 
     pub static jl_main_module: * mut JlModule;
     pub static jl_internal_main_module: * mut JlModule;
@@ -857,4 +866,10 @@ pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static mut JlTLS) -> Box<G
 #[no_mangle]
 pub extern fn neptune_gc_collect<'gc, 'a>(gc: &'gc mut Gc2<'a>, full: c_int) -> c_int {
     gc.collect(full != 0) as c_int
+}
+
+// Tracking malloc'd data
+#[no_mangle]
+pub unsafe extern fn jl_gc_track_malloced_array(tls: &'static mut JlTLS, a: * mut JlArray) {
+    (*tls.tl_gcs).track_malloced_array(a);
 }

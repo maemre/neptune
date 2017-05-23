@@ -30,3 +30,12 @@ void np_verify_parent(char * const ty, jl_value_t * const obj, jl_value_t * cons
 const char * np_jl_symbol_name(jl_sym_t *s) {
   return jl_symbol_name(s);
 }
+
+void np_corruption_fail(jl_datatype_t *vt)
+{
+    jl_printf(JL_STDOUT, "GC error (probable corruption) :\n");
+    gc_debug_print_status();
+    jl_(vt);
+    gc_debug_critical_error();
+    abort();
+}

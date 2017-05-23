@@ -1,6 +1,7 @@
 use libc::*;
 use bit_field::BitField;
 use pages::*;
+use gc2::*;
 use util::*;
 use std::mem;
 use std::env;
@@ -108,43 +109,6 @@ impl<'a> Region<'a> {
             None
         } else {
             Some(offset >> PAGE_LG2) // get the page id from offset
-        }
-    }
-}
-
-// Pool page metadata
-#[repr(C)]
-pub struct PageMeta<'a> {
-    pub pool_n:     u8,   // idx of pool that owns this page
-    // TODO: make following bools after transitioning to Rust
-    pub has_marked: u8,   // whether any cell is marked in this page
-    pub has_young:  u8,   // whether any live and young cells are in this page, before sweeping
-    pub nold:       AtomicU16,  // #old objects
-    pub prev_nold:  u16,  // #old object during previous sweep
-    pub nfree:      u16,  // #free objects, invalid if pool that owns this page is allocating from it
-    pub osize:      u16,  // size of each object in this page
-    pub fl_begin_offset: u16, // offset of the first free object
-    pub fl_end_offset:   u16, // offset of the last free object
-    pub thread_n: u16, // thread id of the heap that owns this page
-    pub data: Option<Box<&'a mut [AtomicU8]>>,
-    pub ages: Option<Box<&'a mut [AtomicU8]>>,
-}
-
-impl<'a> PageMeta<'a> {
-    pub fn new() -> Self {
-        PageMeta {
-            pool_n:     0,
-            has_marked: 0,
-            has_young:  0,
-            nold:       AtomicU16::new(0),
-            prev_nold:  0,
-            nfree:      0,
-            osize:      0,
-            fl_begin_offset: 0,
-            fl_end_offset:   0,
-            thread_n: 0,
-            data: None,
-            ages: None,
         }
     }
 }
