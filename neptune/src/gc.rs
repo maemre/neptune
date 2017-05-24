@@ -94,7 +94,7 @@ impl<'a> Region<'a> {
         self.index_of_raw(page.data.as_ptr())
     }
 
-    // Find page with given data pointer
+    /// Find page containing given data pointer.
     pub fn index_of_raw(&self, data: * const u8) -> Option<usize> {
         // for (i, p) in self.pages.iter().enumerate() {
         //     if p.data.as_ptr() == data {
@@ -103,12 +103,12 @@ impl<'a> Region<'a> {
         // }
         // None
         // optimization of above with pointer arithmetic:
-        let offset = data as usize - self.pages.as_ptr() as usize;
-        if offset >= self.pg_cnt as usize * PAGE_SZ {
+        let offset = data as isize - self.pages.as_ptr() as isize;
+        if offset < 0 || offset >= self.pg_cnt as isize * PAGE_SZ as isize {
             // data is not in the region
             None
         } else {
-            Some(offset >> PAGE_LG2) // get the page id from offset
+            Some(offset as usize >> PAGE_LG2) // get the page id from offset
         }
     }
 }

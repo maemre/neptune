@@ -403,12 +403,12 @@ int mark_reset_age = 0;
 
 static int64_t scanned_bytes; // young bytes scanned while marking
 static int64_t perm_scanned_bytes; // old bytes scanned while marking
-static int prev_sweep_full = 1;
+int prev_sweep_full = 1;
 
 #define inc_sat(v,s) v = (v) >= s ? s : (v)+1
 
 // Full collection heuristics
-static int64_t live_bytes = 0;
+int64_t live_bytes = 0;
 static int64_t promoted_bytes = 0;
 
 static int64_t last_full_live_ub = 0;

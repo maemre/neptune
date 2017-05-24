@@ -39,3 +39,8 @@ void np_corruption_fail(jl_datatype_t *vt)
     gc_debug_critical_error();
     abort();
 }
+
+
+void np_call_finalizer(void * fin, void *p) {
+  ((void (*)(void*))fin)(jl_data_ptr(p));
+}

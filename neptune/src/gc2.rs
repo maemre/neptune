@@ -10,6 +10,7 @@ use std::sync::atomic::*;
 use std::slice;
 use std::ffi::CStr;
 use std::ops::Range;
+use util::*;
 
 const TAG_BITS: u8 = 2; // number of tag bits
 const TAG_RANGE: Range<u8> = 0..TAG_BITS;
@@ -94,7 +95,7 @@ impl JlTaggedValue {
         mem::transmute(self)
     }
     // this is bits in Julia
-    pub fn tag(&self) -> usize {
+    pub fn tag(&self) -> u8 {
         self.header.tag()
     }
     // this will panic if one tries to set bits higher than lowest TAG_BITS bits
@@ -142,7 +143,7 @@ unsafe fn jl_typeof(v: * const JlValue) -> * mut JlDatatype {
 }
 
 trait GcTag {
-    fn tag(&self) -> usize;
+    fn tag(&self) -> u8;
     fn set_tag(&mut self, tag: u8);
     fn marked(&self) -> bool;
     fn set_marked(&mut self, flag: bool);
@@ -155,8 +156,8 @@ trait GcTag {
 impl GcTag for usize {
     // this is bits in Julia
     #[inline(always)]
-    fn tag(&self) -> usize {
-        self.get_bits(TAG_RANGE)
+    fn tag(&self) -> u8 {
+        self.get_bits(TAG_RANGE) as u8
     }
 
     #[inline(always)]
@@ -195,11 +196,12 @@ impl GcTag for usize {
     #[inline(always)]
     fn nontype_tag(&self) -> libc::uintptr_t {
         self & 0x0f
-    }}
+    }
+}
 
 impl GcTag for AtomicUsize {
     #[inline(always)]
-    fn tag(&self) -> usize {
+    fn tag(&self) -> u8 {
         self.load(Ordering::Relaxed).tag()
     }
 
@@ -530,7 +532,7 @@ impl<'a> Gc2<'a> {
            finalizers: Vec::new(),
            finalizers_inhibited: 0,
            tls: tls,
-           allocd: 1 << 20,
+           allocd: 1 << 30, // hit it really quickly the first time
            mark_stack: Vec::new(),
         }
     }
@@ -698,7 +700,7 @@ impl<'a> Gc2<'a> {
 
     pub fn collect(&mut self, full: bool) -> bool {
         let t0 = hrtime();
-
+        let recollect = false;
         // julia's gc.c does the following:
         // 1. fix GC bits of objects in the memset
         // 2.1 mark every object in the last_remsets and rem_binding
@@ -715,28 +717,126 @@ impl<'a> Gc2<'a> {
         self.mark_roots();
         self.visit_mark_stack();
 
+        unsafe {
+            gc_num.since_sweep += (gc_num.allocd + gc_num.interval as i64) as u64;
+        }
+
+        // gc_settime_premark_end
+        // gc_time_mark_pause(t0, scanned_bytes, perm_scanned_bytes)
+
+        let actual_allocd = unsafe { gc_num.since_sweep };
+        // marking is over
+
+        // check for objects to finalize
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * t.tl_gcs };
+            self.sweep_finalizer_list(&mut t.finalizers);
+        }
+        
+        if unsafe { prev_sweep_full } != 0 {
+            unsafe {
+                self.sweep_finalizer_list(&mut finalizer_list_marked);
+            }
+        }
+
+        // mark remaining finalizers
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * t.tl_gcs };
+            // this is self, not t!
+            self.mark_object_list(&mut t.finalizers, 0);
+        }        
+
+        unsafe {
+            self.mark_object_list(&mut finalizer_list_marked, 0);
+        }
+
+        // visit mark stack once before resetting mark_reset_age
+        self.visit_mark_stack();
+        // TODO: reset mark_reset_age to 1
+
+        self.mark_object_list(unsafe { &mut to_finalize }, 0);
+        self.visit_mark_stack();
+
+        // TODO: set mark_reset_age to 0
+        // gc_settime_postmark_end()
+
+        // self.gc_sync_all_caches_nolock()
+
+        // TODO:set a couple stuff, line 1840 of gc.c
+
+        self.verify();
+
+        // TODO: set some stats
+
+        // make a collection/sweep decision
+
+        // sweep
         self.sweep(full);
 
-        self.writeback_stats(t0, full);
+        // writeback stats
+        self.writeback_stats(t0, full, recollect);
 
-        false
+        recollect
+    }
+
+    fn mark_object_list(&mut self, list: * mut JlArrayList, start: usize) {
+        let l = unsafe { &mut *list };
+        let len = l.len;
+        let items = l.as_slice_mut();
+        let mut i = 0;
+        
+        while i < len {
+            let mut v = items[i];
+            if unsafe { intrinsics::unlikely(v.is_null()) } {
+                i += 1;
+                continue;
+            }
+
+            let vp = v as usize;
+
+            if (vp & 1) != 0 {
+                v = vp.clear_tag(1) as * mut libc::c_void;
+                i += 1;
+                debug_assert!(i < len);
+            }
+
+            self.push_root(v, 0);
+            
+            i += 1;
+        }
+    }
+
+    fn verify(&mut self) {
+        // TODO: implement
     }
 
     #[inline(always)]
-    fn writeback_stats(&mut self, t0: u64, full: bool) {
+    fn writeback_stats(&mut self,
+                       t0: u64,
+                       full: bool,
+                       recollect: bool) {
         let gc_end_t = hrtime();
         let pause = gc_end_t - t0;
         unsafe {
             gc_final_pause_end(t0, gc_end_t);
         }
         // Gc2::time_sweep_pause(gc_end_t, actual_allocd, live_bytes, estimate_freed, full);
-        Gc2::time_sweep_pause(gc_end_t, 0, 0, 0, full);
-        // update gc_num stats here
+        Gc2::time_sweep_pause(gc_end_t, 0, 0, full);
+        unsafe {
+            gc_num.full_sweep += full as libc::c_int;
+            prev_sweep_full += full as libc::c_int;
+            gc_num.allocd = - (gc_num.interval as i64);
+            live_bytes += gc_num.since_sweep as i64 - gc_num.freed;
+            gc_num.pause += (! recollect) as libc::c_int;
+            gc_num.total_time += pause;
+            gc_num.since_sweep = 0;
+            gc_num.freed = 0;
+        }
     }
 
     #[cfg(gc_time)]
     #[inline(always)]
-    fn time_sweep_pause(gc_end_t: u64, actual_allocd: i64, live_bytes: i64, estimate_freed: i64, sweep_full: bool) {
+    fn time_sweep_pause(gc_end_t: u64, actual_allocd: i64, estimate_freed: i64, sweep_full: bool) {
         unsafe {
             gc_time_sweep_pause(gc_end_t, actual_allocd, live_bytes, estimate_freed, sweep_full as libc::c_int);
         }
@@ -744,7 +844,7 @@ impl<'a> Gc2<'a> {
 
     #[cfg(not(gc_time))]
     #[inline(always)]
-    fn time_sweep_pause(gc_end_t: u64, actual_allocd: i64, live_bytes: i64, estimate_freed: i64, sweep_full: bool) {
+    fn time_sweep_pause(gc_end_t: u64, actual_allocd: i64, estimate_freed: i64, sweep_full: bool) {
     }
 
 
@@ -1381,6 +1481,73 @@ impl<'a> Gc2<'a> {
         }
     }
 
+    fn sweep_finalizer_list(&mut self, finalizers: &mut JlArrayList) {
+        let listptr = finalizers as * mut JlArrayList;
+        let items = finalizers.as_slice_mut();
+        let mut len = items.len();
+        let mut i = 0;
+        
+        while i < len {
+            let v0 = items[i].clone();
+            let is_cptr = (v0 as usize).marked();
+            let v = (v0 as usize).clear_tag(1) as * mut libc::c_void;
+
+            if unsafe { intrinsics::unlikely(v0.is_null()) } {
+                // remove from this list
+                if i < len - 2 {
+                    items[i] = items[len - 2];
+                    items[i + 1] = items[len - 1];
+                    i -= 2;
+                }
+                len -= 2;
+                continue;
+            }
+
+            let fin = items[i+1].clone();
+            let isfreed = unsafe { &* as_jltaggedvalue(v) }.marked();
+            let isold = unsafe {
+                listptr != (&mut finalizer_list_marked) as * mut JlArrayList &&
+                    unsafe { &* as_jltaggedvalue(v) }.tag() == GC_OLD_MARKED &&
+                    (is_cptr || unsafe { &* as_jltaggedvalue(fin) }.tag() == GC_OLD_MARKED)
+            };
+
+            if isfreed || isold {
+                // remove from this list
+                if i < len - 2 {
+                    items[i] = items[len - 2];
+                    items[i + 1] = items[len - 1];
+                    i -= 2;
+                }
+                len -= 2;
+            }
+
+            if isfreed {
+                if is_cptr {
+                    // schedule finalizer to execute right away if it is native (non-Julia) code
+                    unsafe {
+                        np_call_finalizer(fin, v);
+                    }
+                    continue;
+                }
+
+                unsafe {
+                    to_finalize.push(v);
+                    to_finalize.push(fin);
+                }
+            }
+
+            if isold {
+                // the caller relies on the new objects to be pushed to the end of the list
+                unsafe {
+                    finalizer_list_marked.push(v0);
+                    finalizer_list_marked.push(fin);
+                }
+            }
+            
+            i += 2;
+        }
+    }
+    
     // sweep the object pool memory page by page.
     //
     // N.B. in this code, a "chunk" refers to 32 contiguous pages that
