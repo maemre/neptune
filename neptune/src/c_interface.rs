@@ -944,3 +944,9 @@ pub extern fn neptune_queue_root(gc: &mut Gc2, root: &mut JlValue) {
 pub extern fn neptune_queue_binding<'a>(gc: &mut Gc2<'a>, binding: &'a mut JlBinding<'a>) {
     gc.queue_binding(binding);
 }
+
+#[no_mangle]
+pub unsafe extern fn jl_gc_setmark(tls: &mut JlTLS, v: * mut JlValue) {
+    let gc = &mut *tls.tl_gcs;
+    gc.mark_concurrently(v);
+}

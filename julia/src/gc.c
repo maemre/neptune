@@ -1174,19 +1174,6 @@ STATIC_INLINE int gc_push_root(jl_ptls_t ptls, void *v, int d) // v isa jl_value
     return !gc_old(tag);
 }
 
-// TODO rename this as it is misleading now
-void jl_gc_setmark(jl_ptls_t ptls, jl_value_t *v)
-{
-    jl_taggedvalue_t *o = jl_astaggedvalue(v);
-    uintptr_t tag = o->header;
-    if (!gc_marked(tag)) {
-        uint8_t bits;
-        if (__likely(gc_setmark_tag(o, GC_MARKED, tag, &bits)) && !gc_verifying) {
-            gc_setmark_pool(ptls, o, bits);
-        }
-    }
-}
-
 NOINLINE static int gc_mark_module(jl_ptls_t ptls, jl_module_t *m,
                                    int d, int8_t bits)
 {
@@ -1757,11 +1744,11 @@ static int _jl_gc_collect(jl_ptls_t ptls, int full)
     assert(mark_sp == 0);
 
     int recollect = neptune_gc_collect(ptls->tl_gcs, full);
-    
+
     return recollect;
 
     // Below this is dead code!
-    
+
     /*
     // 1. fix GC bits of objects in the remset.
     for (int t_i = 0; t_i < jl_n_threads; t_i++)

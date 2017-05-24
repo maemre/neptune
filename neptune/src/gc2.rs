@@ -80,7 +80,7 @@ const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(
  * and add the size of the header, to get the pointer to the value it stores
  */
 impl JlTaggedValue {
-    
+
     // implement union members by transmuting memory
     pub unsafe fn next(&self) -> * const JlTaggedValue {
         mem::transmute(self)
@@ -125,6 +125,12 @@ impl JlTaggedValue {
         self.header.load(Ordering::Relaxed)
     }
 
+    /// Read header with no memory guarantee. this is not thread safe w.r.t. other GC threads!
+    #[inline(always)]
+    pub fn yolo_unsafe_header(&mut self) -> libc::uintptr_t {
+        self.header.get_mut().clone()
+    }
+
     // pointer to type of this value
     #[inline(always)]
     pub fn type_tag(&self) -> libc::uintptr_t {
@@ -143,7 +149,7 @@ impl JlTaggedValue {
             mem::transmute((self as * const JlTaggedValue).offset(1))
         }
     }
-    
+
     pub fn mut_value(&mut self) -> &mut JlValue {
         unsafe {
             mem::transmute((self as * mut JlTaggedValue).offset(1))
@@ -723,11 +729,12 @@ impl<'a> Gc2<'a> {
         // 3. walk roots
         // 4. check object to finalize
         // 5. sweep (if quick sweep, put remembered objects in queued state)
+
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             tl_gc.premark();
         }
-        
+
         // finished premark, mark remsets and thread local roots
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
@@ -753,7 +760,7 @@ impl<'a> Gc2<'a> {
         let mut orig_marked_len = unsafe {
             finalizer_list_marked.len
         };
-        
+
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             self.sweep_finalizer_list(&mut t.finalizers);
@@ -893,6 +900,7 @@ impl<'a> Gc2<'a> {
 
         mem::swap(&mut self.heap.remset, &mut self.heap.last_remset);
         self.heap.remset.clear();
+        self.heap.remset_nptr = 0;
     }
 
     fn mark_remset(&mut self, other: &mut Gc2) {
@@ -900,7 +908,7 @@ impl<'a> Gc2<'a> {
             // cannot borrow array item because non-lexical borrowing hasn't landed to Rust yet
             let item = other.heap.last_remset[i].clone();
             let tag = unsafe { &*as_jltaggedvalue(item) };
-            self.scan_obj(&item, 0, tag.type_tag(), tag.nontype_tag() as u8);
+            self.scan_obj3(&item, 0, tag.read_header());
         }
 
         let mut n_bnd_refyoung = 0;
@@ -1425,6 +1433,23 @@ impl<'a> Gc2<'a> {
         }
     }
 
+    /// Mark given object concurrent to program execution. This is confusingly called `jl_gc_setmark` in Julia
+    pub fn mark_concurrently(&mut self, v: * mut JlValue) {
+        let o = unsafe {
+            &mut *as_mut_jltaggedvalue(v)
+        };
+        let tag = o.yolo_unsafe_header();
+
+        if tag.marked() {
+            let mut bits: u8 = 0;
+            unsafe {
+                if intrinsics::likely(self.setmark_tag(o, GC_MARKED, tag, &mut bits) && ! get_gc_verifying()) {
+                    self.setmark_pool(o, bits);
+                }
+            }
+        }
+    }
+
     #[inline(always)]
     fn push_root_if_not_null<T: JlValueLike>(&mut self, p: * mut T, d: i32) {
         if ! p.is_null() {
@@ -1772,6 +1797,7 @@ impl<'a> Gc2<'a> {
             };
 
             if ! tag.marked() {
+                println!("freeing malloc'd array @{:?}", ma[i].a);
                 let a = unsafe {
                     &mut *ma.swap_remove(i).a
                 };
