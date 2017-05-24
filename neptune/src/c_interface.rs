@@ -65,7 +65,7 @@ pub struct JlTask {
     pub exception: * mut JlValue,
     pub backtrace: * mut JlValue,
     pub start: * mut JlFunction,
-    pub ctx: * mut JlJmpBuf,
+    pub ctx: JlJmpBuf,
     pub bufsz: usize,
     pub stkbuf: * mut c_void,
 
@@ -250,6 +250,7 @@ pub struct JlTypeMap {
     pub unknown: * mut JlValue,
 }
 
+#[repr(C)]
 pub struct JlDatatypeLayout {
     pub nfields: u32,
     bits: u32, // these will correspond to the bitfields
@@ -354,7 +355,7 @@ impl JlArrayFlags {
             mem::transmute::<u16, AllocStyle>(self.flags.get_bits(0..2))
         }
     }
-    pub fn ndims(&self) -> u16 {self.flags.get_bits(2..11)}
+    pub fn ndims(&self) -> u16 {self.flags.get_bits(2..12)}
     pub fn pooled(&self) -> bool {self.flags.get_bit(12)}
     pub fn ptrarray(&self) -> bool {self.flags.get_bit(13)}
     pub fn ishared(&self) -> bool {self.flags.get_bit(14)}
@@ -493,6 +494,7 @@ extern {
     pub static jl_typename: *const JlTypename;
     pub static jl_module_type: * const JlDatatype;
     pub static jl_task_type: * const JlDatatype;
+    pub static jl_string_type: * const JlDatatype;
     pub static jl_emptytuple_type: * mut JlDatatype;
     pub static jl_datatype_type: * mut JlDatatype;
 

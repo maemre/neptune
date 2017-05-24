@@ -313,6 +313,7 @@ impl PageMgr {
         self.current_pg_count -= 1;
     }
 
+    /// port of `page_metadata` in Julia
     pub unsafe fn find_pagemeta<T>(&self, ptr: * const T) -> Option<&'static mut PageMeta<'static>> {
         let regions = REGIONS.as_mut().unwrap();
         for region in regions.iter_mut() {
