@@ -191,6 +191,24 @@ impl<T> JlValueLike for T where T: Sized+JlValueMarker {
     }
 }
 
+impl JlValueLike for JlValue {
+    fn as_mut_jlvalue(&mut self) -> &mut JlValue {
+        self
+    }
+
+    fn as_jlvalue(&self) -> &JlValue {
+        self
+    }
+
+    fn from_jlvalue(v: &JlValue) -> &Self {
+        v
+    }
+
+    fn from_jlvalue_mut(v: &mut JlValue) -> &mut Self {
+        v
+    }
+}
+
 impl JlValueMarker for JlModule {
 }
 
@@ -424,7 +442,7 @@ pub const N_CALL_CACHE: usize = 4096; // from options.h
 
 extern {
     pub fn arraylist_push(a: * mut JlArrayList, e: * mut c_void);
-    
+
     pub fn gc_final_count_page(pg_cnt: usize);
     pub fn gc_final_pause_end(t0: u64, tend: u64);
     pub fn gc_time_sweep_pause(gc_end_t: u64, actual_allocd: i64, live_bytes: i64, estimate_freed: i64, sweep_full: c_int);
@@ -448,7 +466,7 @@ extern {
     pub fn np_corruption_fail(vt: * mut JlDatatype) -> !;
     pub fn np_verify_parent(ty: * const c_char, o: * const JlValue, slot: * const * mut JlValue, msg: * const c_char);
     pub fn np_call_finalizer(fin: * mut c_void, p: * mut c_void);
-    
+
     // list of global threads, declared in julia/src/threading.c
     pub static jl_n_threads: u32;
     pub static jl_all_tls_states: * mut &'static mut JlTLS;
@@ -494,7 +512,7 @@ extern {
     pub static mut gc_num: GcNum;
     pub static mut live_bytes: i64;
     pub static mut prev_sweep_full: libc::c_int;
-    
+
     pub static mut finalizer_list_marked: JlArrayList;
     pub static mut to_finalize: JlArrayList;
 }

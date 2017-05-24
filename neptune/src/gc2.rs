@@ -440,7 +440,7 @@ pub struct ThreadHeap<'a> {
     // big objects
     big_objects: Vec<&'a mut BigVal>,
     // remset
-    rem_bindings: Vec<JlBinding<'a>>,
+    rem_bindings: Vec<&'a mut JlBinding<'a>>,
     remset: Vec<* mut JlValue>,
     last_remset: Vec<* mut JlValue>,
 }
@@ -532,7 +532,7 @@ impl<'a> Gc2<'a> {
            finalizers: Vec::new(),
            finalizers_inhibited: 0,
            tls: tls,
-           allocd: 1 << 30, // hit it really quickly the first time
+           allocd: 1 << 17, // hit it really quickly the first time
            mark_stack: Vec::new(),
         }
     }
@@ -711,7 +711,7 @@ impl<'a> Gc2<'a> {
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             tl_gc.premark();
-            tl_gc.mark_remset();
+            self.mark_remset(tl_gc); // TODO: make this just tl_gc to separate marking even better
             tl_gc.mark_thread_local();
         }
         self.mark_roots();
@@ -732,7 +732,7 @@ impl<'a> Gc2<'a> {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             self.sweep_finalizer_list(&mut t.finalizers);
         }
-        
+
         if unsafe { prev_sweep_full } != 0 {
             unsafe {
                 self.sweep_finalizer_list(&mut finalizer_list_marked);
@@ -744,7 +744,7 @@ impl<'a> Gc2<'a> {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             // this is self, not t!
             self.mark_object_list(&mut t.finalizers, 0);
-        }        
+        }
 
         unsafe {
             self.mark_object_list(&mut finalizer_list_marked, 0);
@@ -784,7 +784,7 @@ impl<'a> Gc2<'a> {
         let len = l.len;
         let items = l.as_slice_mut();
         let mut i = 0;
-        
+
         while i < len {
             let mut v = items[i];
             if unsafe { intrinsics::unlikely(v.is_null()) } {
@@ -801,7 +801,7 @@ impl<'a> Gc2<'a> {
             }
 
             self.push_root(v, 0);
-            
+
             i += 1;
         }
     }
@@ -849,34 +849,51 @@ impl<'a> Gc2<'a> {
 
 
     fn premark(&mut self) {
-      mem::swap(&mut self.heap.remset, &mut self.heap.last_remset);
-      for item in self.heap.remset.iter() {
-        // TODO import and call objprofile_count(..)
-        unsafe { (*as_mut_jltaggedvalue(*item)).set_tag(GC_OLD_MARKED) };
-      }
-      //self.heap.remset.len = 0;
-      //self.heap.remset_nptr = 0;
-      // TODO
+        for item in self.heap.remset.iter() {
+          // TODO import and call objprofile_count(..)
+            unsafe {
+                (*as_mut_jltaggedvalue(*item)).set_tag(GC_OLD_MARKED);
+            }
+        }
+
+        for item in self.heap.rem_bindings.iter_mut() {
+          // TODO import and call objprofile_count(..)
+            unsafe {
+                (*as_mut_jltaggedvalue((*item).as_mut_jlvalue())).set_tag(GC_OLD_MARKED);
+            }
+        }
+
+        mem::swap(&mut self.heap.remset, &mut self.heap.last_remset);
+        self.heap.remset.clear();
     }
 
-    fn mark_remset(&mut self) {
-        for i in 0..self.heap.last_remset.len() { // TODO what
+    fn mark_remset(&mut self, other: &mut Gc2) {
+        for i in 0..other.heap.last_remset.len() {
             // cannot borrow array item because non-lexical borrowing hasn't landed to Rust yet
-            let item = self.heap.last_remset[i].clone();
+            let item = other.heap.last_remset[i].clone();
             let tag = unsafe { &*as_jltaggedvalue(item) };
             self.scan_obj(&item, 0, tag.type_tag(), tag.nontype_tag() as u8);
         }
 
-      for item in &self.heap.rem_bindings {
-        // push root(ptls, ptr->value, 0)
-        // if item was young, put on rem_bindings list, so that by end, rem_bindings list's length is
-        // the number of new items pushed
-      }
-      //self.heap.rem_bindings TODO
+        let mut n_bnd_refyoung = 0;
+
+        for i in 0..other.heap.rem_bindings.len() {
+            if other.heap.rem_bindings[i].value.is_null() {
+                continue;
+            }
+
+            let is_young = self.push_root(other.heap.rem_bindings[i].value, 0) != 0; // for lexical borrow
+
+            if is_young {
+                // reusing processed indices
+                other.heap.rem_bindings.swap(i, n_bnd_refyoung);
+                n_bnd_refyoung += 1;
+            }
+        }
+
+        other.heap.rem_bindings.truncate(n_bnd_refyoung);
     }
 
-    // TODO may need self to be mutable, meaning need to make
-    // callers use mutable reference too, etc.
     // Julia's gc marks the object and recursively marks its children, queueing objecs
     // on mark stack when recursion depth is too great.
     fn scan_obj(&mut self, v: &*mut JlValue, _d: i32, tag: libc::uintptr_t, bits: u8) {
@@ -1380,21 +1397,25 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    fn mark_thread_local(&mut self) {
-        if ! self.tls.current_module.is_null() {
-            unsafe {
-                self.push_root((* self.tls.current_module).as_mut_jlvalue(), 0);
-            }
+    #[inline(always)]
+    fn push_root_if_not_null<T: JlValueLike>(&mut self, p: * mut T, d: i32) {
+        if ! p.is_null() {
+            self.push_root(unsafe { (* p).as_mut_jlvalue() }, d);
         }
+    }
 
-        unsafe {
-            self.push_root((&mut *self.tls.current_task).as_mut_jlvalue(), 0);
-            self.push_root((&mut *self.tls.root_task).as_mut_jlvalue(), 0);
-        }
+    fn mark_thread_local(&mut self) {
+        let m = self.tls.current_module.clone();
+        let ct = self.tls.current_task.clone();
+        let rt = self.tls.root_task.clone();
         let exn = self.tls.exception_in_transit.clone();
-        self.push_root(exn, 0);
         let ta = self.tls.task_arg_in_transit.clone();
-        self.push_root(ta, 0);
+
+        self.push_root_if_not_null(m, 0);
+        self.push_root_if_not_null(ct, 0);
+        self.push_root_if_not_null(rt, 0);
+        self.push_root_if_not_null(exn, 0);
+        self.push_root_if_not_null(ta, 0);
     }
 
     #[inline(always)]
@@ -1486,7 +1507,7 @@ impl<'a> Gc2<'a> {
         let items = finalizers.as_slice_mut();
         let mut len = items.len();
         let mut i = 0;
-        
+
         while i < len {
             let v0 = items[i].clone();
             let is_cptr = (v0 as usize).marked();
@@ -1543,11 +1564,11 @@ impl<'a> Gc2<'a> {
                     finalizer_list_marked.push(fin);
                 }
             }
-            
+
             i += 2;
         }
     }
-    
+
     // sweep the object pool memory page by page.
     //
     // N.B. in this code, a "chunk" refers to 32 contiguous pages that
