@@ -1440,7 +1440,7 @@ impl<'a> Gc2<'a> {
         };
         let tag = o.yolo_unsafe_header();
 
-        if tag.marked() {
+        if ! tag.marked() {
             let mut bits: u8 = 0;
             unsafe {
                 if intrinsics::likely(self.setmark_tag(o, GC_MARKED, tag, &mut bits) && ! get_gc_verifying()) {
