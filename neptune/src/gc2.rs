@@ -80,7 +80,7 @@ const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(
  * and add the size of the header, to get the pointer to the value it stores
  */
 impl JlTaggedValue {
-
+    
     // implement union members by transmuting memory
     pub unsafe fn next(&self) -> * const JlTaggedValue {
         mem::transmute(self)
@@ -135,6 +135,19 @@ impl JlTaggedValue {
     #[inline(always)]
     pub fn nontype_tag(&self) -> libc::uintptr_t {
         self.read_header().nontype_tag()
+    }
+
+    // accessors to get the associated value
+    pub fn get_value(&self) -> &JlValue {
+        unsafe {
+            mem::transmute((self as * const JlTaggedValue).offset(1))
+        }
+    }
+    
+    pub fn mut_value(&mut self) -> &mut JlValue {
+        unsafe {
+            mem::transmute((self as * mut JlTaggedValue).offset(1))
+        }
     }
 }
 
@@ -443,6 +456,7 @@ pub struct ThreadHeap<'a> {
     rem_bindings: Vec<&'a mut JlBinding<'a>>,
     remset: Vec<* mut JlValue>,
     last_remset: Vec<* mut JlValue>,
+    remset_nptr: usize,
 }
 
 impl<'a> ThreadHeap<'a> {
@@ -461,6 +475,7 @@ impl<'a> ThreadHeap<'a> {
             rem_bindings: Vec::new(),
             remset: Vec::new(),
             last_remset: Vec::new(),
+            remset_nptr: 0,
         }
     }
 }
@@ -1037,7 +1052,7 @@ impl<'a> Gc2<'a> {
             let mut bits: u8 = 0;
             if unsafe { intrinsics::likely(self.setmark_tag(o, GC_MARKED, tag, &mut bits)) } {
                 let tag = tag & !0xf;
-                if ! get_gc_verifying() {
+                if false { // ! get_gc_verifying() {
                     self.mark_obj(e, tag, bits);
                 }
                 self.scan_obj(&e, d, tag, bits);
@@ -1821,5 +1836,32 @@ impl<'a> Gc2<'a> {
         // TODO: sweep finalizer list
 
         println!("sweep done")
+    }
+
+    // Functions for write barrier
+    #[inline(always)]
+    pub fn queue_root(&mut self, root: &mut JlValue) {
+        let tag = as_managed_jltaggedvalue(root);
+        debug_assert!(tag.tag() == GC_OLD_MARKED);
+
+        // N.B. The modification of the tag is not atomic!
+        // It should be ok since this is not a GC safepoint.
+        tag.header.get_mut().set_tag(GC_MARKED);
+        self.heap.remset.push(tag.mut_value()); // we use get_value instead of directly root to make borrow checker happy
+        self.heap.remset_nptr += 1; // conservative, in case of root being a pointer
+    }
+    
+    #[inline(always)]
+    pub fn queue_binding(&mut self, binding: &'a mut JlBinding<'a>) {
+        let tag = unsafe {
+            &mut *as_mut_jltaggedvalue(binding.as_mut_jlvalue())
+        };
+        debug_assert!(tag.tag() == GC_OLD_MARKED);
+
+        // N.B. The modification of the tag is not atomic!
+        // It should be ok since this is not a GC safepoint.
+        tag.header.get_mut().set_tag(GC_MARKED);
+
+        self.heap.rem_bindings.push(binding);
     }
 }

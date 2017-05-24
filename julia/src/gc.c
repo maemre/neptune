@@ -1134,32 +1134,13 @@ static void grow_mark_stack(void)
 JL_DLLEXPORT void jl_gc_queue_root(jl_value_t *ptr)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
-    jl_taggedvalue_t *o = jl_astaggedvalue(ptr);
-#ifndef JULIA_ENABLE_THREADING
-    // Disable this assert since it can happen with multithreading (same
-    // with the ones in gc_queue_binding) when two threads are writing
-    // to the same object.
-    assert(o->bits.gc == GC_OLD_MARKED);
-#endif
-    // The modification of the `gc_bits` is not atomic but it
-    // should be safe here since GC is not allowed to run here and we only
-    // write GC_OLD to the GC bits outside GC. This could cause
-    // duplicated objects in the remset but that shouldn't be a problem.
-    o->bits.gc = GC_MARKED;
-    arraylist_push(ptls->heap.remset, ptr);
-    ptls->heap.remset_nptr++; // conservative
+    neptune_queue_root(ptls->tl_gcs, ptr);
 }
 
 void gc_queue_binding(jl_binding_t *bnd)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
-    jl_taggedvalue_t *buf = jl_astaggedvalue(bnd);
-#ifndef JULIA_ENABLE_THREADING
-    // Will fail for multithreading. See `jl_gc_queue_root`
-    assert(buf->bits.gc == GC_OLD_MARKED);
-#endif
-    buf->bits.gc = GC_MARKED;
-    arraylist_push(&ptls->heap.rem_bindings, bnd);
+    neptune_queue_binding(ptls->tl_gcs, bnd);
 }
 
 static void gc_scan_obj_(jl_ptls_t ptls, jl_value_t *v, int d,

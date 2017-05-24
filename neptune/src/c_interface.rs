@@ -932,3 +932,15 @@ pub extern fn neptune_gc_collect<'gc, 'a>(gc: &'gc mut Gc2<'a>, full: c_int) -> 
 pub unsafe extern fn jl_gc_track_malloced_array(tls: &'static mut JlTLS, a: * mut JlArray) {
     (*tls.tl_gcs).track_malloced_array(a);
 }
+
+//----------------------------------------------------------------------------------
+// Write barrier entry points
+#[no_mangle]
+pub extern fn neptune_queue_root(gc: &mut Gc2, root: &mut JlValue) {
+    gc.queue_root(root);
+}
+
+#[no_mangle]
+pub extern fn neptune_queue_binding<'a>(gc: &mut Gc2<'a>, binding: &'a mut JlBinding<'a>) {
+    gc.queue_binding(binding);
+}
