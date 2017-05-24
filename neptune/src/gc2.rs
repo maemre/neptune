@@ -892,7 +892,6 @@ impl<'a> Gc2<'a> {
         }
 
         for item in self.heap.rem_bindings.iter_mut() {
-          // TODO import and call objprofile_count(..)
             unsafe {
                 (*as_mut_jltaggedvalue((*item).as_mut_jlvalue())).set_tag(GC_OLD_MARKED);
             }
@@ -934,12 +933,13 @@ impl<'a> Gc2<'a> {
     // on mark stack when recursion depth is too great.
     fn scan_obj(&mut self, v: &*mut JlValue, _d: i32, tag: libc::uintptr_t, bits: u8) {
         let vt: *const JlDatatype = tag as *mut JlDatatype;
-        let mut d = _d;
         let mut nptr = 0;
         let mut refyoung = 0;
 
-        assert_ne!(bits & GC_MARKED, 0);
-        assert_ne!(vt, jl_symbol_type);
+        debug_assert!(! v.is_null());
+        debug_assert_ne!(bits & GC_MARKED, 0);
+        debug_assert_ne!(vt, jl_symbol_type); // should've checked in `gc_mark_obj`
+        
         if vt == jl_weakref_type {
             return // don't mark weakrefs
         }
@@ -948,7 +948,7 @@ impl<'a> Gc2<'a> {
             return; // fast path for pointerless types
         }
 
-        d += 1;
+        let d = _d + 1;
         if d >= MAX_MARK_DEPTH {
             // queue the root
             self.mark_stack.push(*v);
@@ -960,7 +960,7 @@ impl<'a> Gc2<'a> {
             let data = unsafe { np_jl_svec_data(*v) };
             let l = unsafe { (*vec).length };
             nptr += 1;
-            let elements = unsafe { slice::from_raw_parts_mut(data, l as usize) };
+            let elements: &mut[* mut JlValue] = unsafe { slice::from_raw_parts_mut(data, l as usize) };
             let mut i = 0;
             for e in elements {
                 if ! (*e).is_null() {
@@ -971,7 +971,7 @@ impl<'a> Gc2<'a> {
             }
         } else if unsafe { (*vt).name == jl_array_typename } {
             let a = unsafe {
-                &mut * mem::transmute::<*mut JlValue, *mut JlArray>(*v)
+                JlArray::from_jlvalue_mut(&mut **v)
             };
             let flags = a.flags.clone();
             if flags.how() == AllocStyle::HasOwnerPointer {
@@ -1049,25 +1049,32 @@ impl<'a> Gc2<'a> {
 
         // label 'ret:
         if bits == GC_OLD_MARKED && refyoung > 0 && ! get_gc_verifying() {
+            self.heap.remset_nptr += nptr;
             self.heap.remset.push(*v);
         }
     }
 
     fn push_root(&mut self, e: *mut JlValue, d: i32) -> i32 {
+        // N.B. Julia has `gc_findval` to interact with GDB for finding the gc-root for a value.
+        // We should implement something similar for simpler debugging
+
+        debug_assert!(! e.is_null());
+        
         let o = unsafe { &mut *as_mut_jltaggedvalue(e) };
+        // TODO: verify_val(v);
         let tag = o.read_header();
         if ! tag.marked() {
             let mut bits: u8 = 0;
             if unsafe { intrinsics::likely(self.setmark_tag(o, GC_MARKED, tag, &mut bits)) } {
                 let tag = tag & !0xf;
-                if false { // ! get_gc_verifying() {
+                if ! get_gc_verifying() {
                     self.mark_obj(e, tag, bits);
                 }
                 self.scan_obj(&e, d, tag, bits);
             }
-            return (bits & GC_OLD != 0) as i32;
+            return (! (bits as usize).old()) as i32;
         }
-        return ((tag as u8) & GC_OLD != 0) as i32;
+        return (! tag.old()) as i32;
     }
 
     /// Update metadata of a marked object without scanning it
@@ -1075,7 +1082,7 @@ impl<'a> Gc2<'a> {
         debug_assert!(! v.is_null());
         debug_assert!((bits as usize).marked());
 
-        let o = as_mut_jltaggedvalue(v);
+        let o: * mut JlTaggedValue = as_mut_jltaggedvalue(v);
         let vtref = tag.type_tag() as * const JlDatatype;
         let vt = unsafe { &mut * (vtref as * mut JlDatatype) };
 
@@ -1123,7 +1130,7 @@ impl<'a> Gc2<'a> {
             unsafe {
                 self.setmark(o, bits, mem::size_of::<JlTask>());
             }
-        } else if vtref == jl_module_type {
+        } else if vtref == jl_string_type {
             unsafe {
                 // length of the string
                 let len = *(v as * const usize);
@@ -1153,7 +1160,7 @@ impl<'a> Gc2<'a> {
 
         let (tag, mark_mode) = if get_mark_reset_age() != 0 {
             // reset the object's age to young, as if it is just allocated
-            (tag | mark_mode as usize, GC_MARKED)
+            (tag | GC_MARKED as usize, GC_MARKED)
         } else {
             let mark_mode = if tag.old() {
                 GC_OLD_MARKED
@@ -1176,7 +1183,8 @@ impl<'a> Gc2<'a> {
             &mut *as_mut_jltaggedvalue(o)
         };
         let tag = buf.read_header();
-        if buf.marked() {
+        
+        if tag.marked() {
             return;
         }
 
@@ -1187,11 +1195,14 @@ impl<'a> Gc2<'a> {
                 let maybe_meta = unsafe {
                     self.pg_mgr.find_pagemeta(o)
                 };
-                maybe_meta.map(|meta| {
-                    // object belongs to a pool managed by page manager
-                    self.setmark_pool_(buf, bits, meta);
-                    return;
-                });
+                match maybe_meta {
+                    Some(meta) => {
+                        // object belongs to a pool managed by page manager
+                        self.setmark_pool_(buf, bits, meta);
+                        return;
+                    }
+                    None => ()
+                }
             }
             // object doesn't belong to a pool
             self.setmark_big(buf, bits);
@@ -1265,7 +1276,6 @@ impl<'a> Gc2<'a> {
     }
 
     fn mark_module(&mut self, m: &mut JlModule, d: i32, bits: u8) -> i32 {
-        let mut i = 0;
         let mut refyoung = 0;
         let mut table = unsafe {
             slice::from_raw_parts_mut(m.bindings.table, m.bindings.size)
