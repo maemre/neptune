@@ -18,7 +18,7 @@ use core::ops::Deref;
 use core::ops::DerefMut;
 use core;
 use bit_field::BitField;
-use std::sync::atomic;
+use std::sync::atomic::*;
 use std::ffi::CString;
 
 #[repr(C)]
@@ -227,6 +227,12 @@ pub fn as_mut_jltaggedvalue(v: * mut JlValue) -> * mut JlTaggedValue {
     }
 }
 
+pub fn as_managed_jltaggedvalue(v: &mut JlValue) -> &mut JlTaggedValue {
+    unsafe {
+        &mut *mem::transmute::<* mut JlValue, * mut JlTaggedValue>(v).offset(-1)
+    }
+}
+
 // Note: this is actually a union with the shape:
 //
 // ```
@@ -431,7 +437,7 @@ impl JlValueMarker for JlArray {
 
 // this is actually just the tag
 pub struct JlTaggedValue {
-    pub header: atomic::AtomicUsize
+    pub header: AtomicUsize
 }
 // this is actually mem::size_of::<JlTaggedValue>(), we cannot make it a static const
 // because `size_of` is not yet constant in Rust unfortunately.
@@ -505,7 +511,7 @@ extern {
     #[cfg(gc_verify)]
     pub static gc_verifying: libc::c_int;
 
-    pub static mark_reset_age: libc::c_int;
+    pub static mark_reset_age: AtomicI32; // assuming c_int = i32
 
     pub static call_cache: [* mut JlTypeMapEntry; N_CALL_CACHE];
 
@@ -515,6 +521,16 @@ extern {
 
     pub static mut finalizer_list_marked: JlArrayList;
     pub static mut to_finalize: JlArrayList;
+}
+
+#[inline(always)]
+pub fn get_mark_reset_age() -> i32 {
+    mark_reset_age.load(Ordering::Relaxed)
+}
+
+#[inline(always)]
+pub fn set_mark_reset_age(n: i32) {
+    mark_reset_age.store(n, Ordering::Relaxed);
 }
 
 #[inline(always)]

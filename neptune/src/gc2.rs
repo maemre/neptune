@@ -711,11 +711,18 @@ impl<'a> Gc2<'a> {
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             tl_gc.premark();
+        }
+        
+        // finished premark, mark remsets and thread local roots
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * t.tl_gcs };
             self.mark_remset(tl_gc); // TODO: make this just tl_gc to separate marking even better
             tl_gc.mark_thread_local();
         }
+
+        // walk the roots
         self.mark_roots();
-        self.visit_mark_stack();
+        self.visit_mark_stack(); // this function processes all the pushed roots
 
         unsafe {
             gc_num.since_sweep += (gc_num.allocd + gc_num.interval as i64) as u64;
@@ -728,6 +735,10 @@ impl<'a> Gc2<'a> {
         // marking is over
 
         // check for objects to finalize
+        let mut orig_marked_len = unsafe {
+            finalizer_list_marked.len
+        };
+        
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             self.sweep_finalizer_list(&mut t.finalizers);
@@ -737,6 +748,7 @@ impl<'a> Gc2<'a> {
             unsafe {
                 self.sweep_finalizer_list(&mut finalizer_list_marked);
             }
+            orig_marked_len = 0;
         }
 
         // mark remaining finalizers
@@ -747,17 +759,18 @@ impl<'a> Gc2<'a> {
         }
 
         unsafe {
-            self.mark_object_list(&mut finalizer_list_marked, 0);
+            // check only the remainder of finalizer_list_marked
+            self.mark_object_list(&mut finalizer_list_marked, orig_marked_len);
         }
 
         // visit mark stack once before resetting mark_reset_age
         self.visit_mark_stack();
-        // TODO: reset mark_reset_age to 1
+        set_mark_reset_age(1);
 
         self.mark_object_list(unsafe { &mut to_finalize }, 0);
         self.visit_mark_stack();
 
-        // TODO: set mark_reset_age to 0
+        set_mark_reset_age(0);
         // gc_settime_postmark_end()
 
         // self.gc_sync_all_caches_nolock()
@@ -768,7 +781,7 @@ impl<'a> Gc2<'a> {
 
         // TODO: set some stats
 
-        // make a collection/sweep decision
+        // TODO: make a collection/sweep decision based on statistics
 
         // sweep
         self.sweep(full);
@@ -1115,7 +1128,7 @@ impl<'a> Gc2<'a> {
         debug_assert!(! tag.marked());
         debug_assert!((mark_mode as usize).marked(), format!("Found mark_mode {} rather than a marked one", mark_mode));
 
-        let (tag, mark_mode) = if mark_reset_age != 0 {
+        let (tag, mark_mode) = if get_mark_reset_age() != 0 {
             // reset the object's age to young, as if it is just allocated
             (tag | mark_mode as usize, GC_MARKED)
         } else {
@@ -1174,7 +1187,7 @@ impl<'a> Gc2<'a> {
         } else {
             self.cache.scanned_bytes += meta.osize as usize;
 
-            if mark_reset_age != 0 {
+            if get_mark_reset_age() != 0 {
                 meta.has_young = 1;
                 unsafe {
                     let page_begin = Page::of_raw(o).offset(GC_PAGE_OFFSET as isize);
@@ -1209,7 +1222,7 @@ impl<'a> Gc2<'a> {
             self.cache.scanned_bytes += nbytes;
             // object may be young, may be old. however, if object's
             // age is 0 then it has to be young
-            if mark_reset_age != 0 && hdr.age() != 0 {
+            if get_mark_reset_age() != 0 && hdr.age() != 0 {
                 // reset the age
                 hdr.set_age(0);
                 self.gc_queue_big_marked(hdr, true);
@@ -1778,7 +1791,7 @@ impl<'a> Gc2<'a> {
     }
 
     fn sweep(&mut self, full: bool) {
-
+        println!("sweeping weak refs");
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_weakrefs();
