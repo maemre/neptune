@@ -14,6 +14,6 @@ void neptune_free_page(void * page);
 
 // write barrier 
 void neptune_queue_root(tl_gcs_t *gc, jl_value_t * root);
-void neptune_queue_binding(tl_gcs_t *gc, jl_value_t * binding);
+void neptune_queue_binding(tl_gcs_t *gc, jl_binding_t * binding);
 
 #endif // NEPTUNE_H
