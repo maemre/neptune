@@ -16,8 +16,9 @@ void neptune_free_page(void * page);
 void neptune_queue_root(tl_gcs_t *gc, jl_value_t * root);
 void neptune_queue_binding(tl_gcs_t *gc, jl_binding_t * binding);
 
-// weakrefs
+// to push object to heap
 void neptune_push_weakref(tl_gcs_t *gc, jl_weakref_t *wr);
+void neptune_push_big_object(tl_gcs_t *gc, bigval_t *b);
 
 // external marking stuff
 void neptune_visit_mark_stack(tl_gcs_t *gc);

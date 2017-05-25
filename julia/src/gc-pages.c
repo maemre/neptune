@@ -13,7 +13,7 @@ extern "C" {
 // A region is contiguous storage for up to DEFAULT_REGION_PG_COUNT naturally aligned GC_PAGE_SZ pages
 // It uses a very naive allocator (see jl_gc_alloc_page & jl_gc_free_page)
 #if defined(_P64)
-#define DEFAULT_REGION_PG_COUNT (16 * 8 * 4096) // 8 GB
+#define DEFAULT_REGION_PG_COUNT (4 * 8 * 4096) // 2 GB, easier to debug
 #else
 #define DEFAULT_REGION_PG_COUNT (8 * 4096) // 512 MB
 #endif

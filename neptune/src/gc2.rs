@@ -27,6 +27,7 @@ const GC_OLD_MARKED: u8 = (GC_OLD | GC_MARKED);
 const MAX_MARK_DEPTH: i32 = 400;
 
 const DEFAULT_COLLECT_INTERVAL: isize = 5600 * 1024 * 8;
+const MAX_COLLECT_INTERVAL: usize = 1250000000;
 
 // offset for aligning data in page to 16 bytes (JL_SMALL_BYTE_ALIGNMENT) after tag.
 pub const GC_PAGE_OFFSET: usize = (JL_SMALL_BYTE_ALIGNMENT - (SIZE_OF_JLTAGGEDVALUE % JL_SMALL_BYTE_ALIGNMENT));
@@ -55,6 +56,8 @@ static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
     //    64,   32,  160,   64,   16,   64,  112,  128, bytes lost
 ];
 const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(), size_of isn't a const fn yet :(
+
+
 
 /*
  * in julia/src/julia.h:
@@ -411,7 +414,7 @@ impl<'a> PageMeta<'a> {
 
     // similar to `reset_page` in Julia but doesn't add a pointer to page data
     // and doesn't do the newpages optimization
-    // TODO: #[inline(always)]
+    #[inline(always)]
     pub fn reset(&mut self, poolIndex: u8) -> (usize, usize) {
         self.pool_n = poolIndex;
         // make sure that we have enough offset to fit a pointer, this can be
@@ -461,7 +464,7 @@ pub struct ThreadHeap<'a> {
     mallocarrays: Vec<MallocArray>,
     mafreelist: Vec<MallocArray>,
     // big objects
-    big_objects: Vec<&'a mut BigVal>,
+    pub big_objects: Vec<&'a mut BigVal>,
     // remset
     rem_bindings: Vec<&'a mut JlBinding<'a>>,
     remset: Vec<* mut JlValue>,
@@ -521,15 +524,13 @@ pub struct GcFrame {
 // Lifetimes here don't have a meaning, yet
 pub struct Gc2<'a> {
     // heap for current thread
-    heap: ThreadHeap<'a>,
+    pub heap: ThreadHeap<'a>,
     // handle for page manager
     pg_mgr: &'a mut PageMgr,
     // mark cache for thread-local marks
     cache: GcMarkCache,
     // Age of the world, used for promotion
     world_age: usize,
-    // State of GC for this thread; TODO possibly move some back (not using most)
-    gc_state: GcState,
     in_finalizer: bool,
     disable_gc: bool,
     // parent pointer to thread-local storage for other fields
@@ -548,7 +549,6 @@ impl<'a> Gc2<'a> {
            pg_mgr: pg_mgr,
            cache: GcMarkCache::new(),
            world_age: 0,
-           gc_state: GcState::Safe,
            in_finalizer: false,
            disable_gc: false,
            tls: tls,
@@ -574,15 +574,6 @@ impl<'a> Gc2<'a> {
             Some(s) => s,
             None => panic!("Memory error: requested object is too large to represent with native pointer size")
         };
-        // TODO: make this better, currently we are collecting for every MB
-        self.allocd += allocsz as isize;
-        if self.allocd > 0 {
-            unsafe {
-                jl_gc_collect(0);
-            }
-            self.allocd = - DEFAULT_COLLECT_INTERVAL;
-            println!("collected small");
-        }
         let v = if allocsz <= GC_MAX_SZCLASS + mem::size_of::<JlTaggedValue>() {
             self.pool_alloc(allocsz)
         } else {
@@ -597,6 +588,25 @@ impl<'a> Gc2<'a> {
     // Semi-equivalent(?) to: julia/src/gc.c:jl_gc_pool_alloc
     pub fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
         let osize = size - mem::size_of::<JlTaggedValue>();
+
+        debug_assert_eq!(self.ptls.gc_state, 0); // make sure that GC is not working!
+
+        if cfg!(memdebug) {
+            return self.big_alloc(size);
+        }
+
+        self.allocd += size as isize;
+        if unsafe { intrinsics::unlikely(self.allocd > 0) || (if cfg!(gc_debug_env) { gc_debug_check_pool() != 0 } else false) } {
+            println!("triggering periodic collection");
+            unsafe {
+                jl_gc_collect(0);
+            }
+        }
+
+        unsafe {
+            gc_num.poolalloc += 1;
+        }
+        
         let v = match self.find_pool(&osize) {
             Some(pool_index) => {
                 // TODO: check if pool is full, see below...
@@ -722,19 +732,11 @@ impl<'a> Gc2<'a> {
 
     pub fn collect(&mut self, full: bool) -> bool {
         let t0 = hrtime();
-        let recollect = false;
 
         println!("commence collection");
         debug_assert!(self.mark_stack.is_empty());
         
-        // julia's gc.c does the following:
-        // 1. fix GC bits of objects in the memset
-        // 2.1 mark every object in the last_remsets and rem_binding
-        // 2.2 mark every thread local root
-        // 3. walk roots
-        // 4. check object to finalize
-        // 5. sweep (if quick sweep, put remembered objects in queued state)
-
+        // 1. fix GC bits of objects in the memset (a.k.a. premark)
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             tl_gc.premark();
@@ -759,7 +761,7 @@ impl<'a> Gc2<'a> {
         // gc_time_mark_pause(t0, scanned_bytes, perm_scanned_bytes)
 
         let actual_allocd = unsafe { gc_num.since_sweep };
-        // marking is over
+        // walking roots is over, time for finalizers
 
         // check for objects to finalize
         let mut orig_marked_len = unsafe {
@@ -768,7 +770,7 @@ impl<'a> Gc2<'a> {
 
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
-            self.sweep_finalizer_list(&mut t.finalizers);
+            self.sweep_finalizer_list(&mut t.finalizers); // these are confusingly called `sweep_finalizer_list`
         }
 
         if unsafe { prev_sweep_full } != 0 {
@@ -790,35 +792,94 @@ impl<'a> Gc2<'a> {
             self.mark_object_list(&mut finalizer_list_marked, orig_marked_len);
         }
 
-        // visit mark stack once before resetting mark_reset_age
+        // visit mark stack once before resetting mark_reset_age (in case of extra markings happened during finalizers?)
         self.visit_mark_stack();
         set_mark_reset_age(1);
 
+        // reset the age and old bit for any unmarked objects
+        // referenced by to_finalize list. Note that these objects
+        // can't be accessed outside `to_finalize` since they are
+        // still unmarked.
         self.mark_object_list(unsafe { &mut to_finalize }, 0);
         self.visit_mark_stack();
 
         set_mark_reset_age(0);
         // gc_settime_postmark_end()
 
+        // flush everything in mark caches
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             // this is self, not tl_gc!
             self.sync_cache_nolock(&mut tl_gc.cache);
         }
 
-        // TODO:set a couple stuff, line 1840 of gc.c
 
+        let live_sz_ub: i64 = live_bytes + actual_allocd;
+        let live_sz_est: i64 = scanned_bytes + perm_scanned_bytes;
+        let estimate_freed: i64 = live_sz_ub - live_sz_est;
+        
         self.verify();
 
-        // TODO: set some stats
+        // TODO: call gc_stats.*
+        
+        // make a collection/sweep decision based on statistics
 
-        // TODO: make a collection/sweep decision based on statistics
+        // we want to free ~70% if possible.
+        let not_freed_enough = estimate_freed < 7 * (actual_allocd/10);
+        let mut nptr = 0;
+        nptr += unsafe {
+            get_all_tls().iter().fold(0, |acc, &t| { acc + (&*t.tl_gcs).heap.remset_nptr })
+        };
 
+        // if there are many intergenerational pointers then quick (not full, only young gen) sweep is not so quick
+        let large_frontier = nptr * mem::size_of::<* mut libc::c_void>() >= DEFAULT_COLLECT_INTERVAL as usize;
+        let mut sweep_full = false;
+        let mut recollect = false;
+
+        if (full || large_frontier ||
+            ((not_freed_enough || promoted_bytes >= gc_num.interval) &&
+             (promoted_bytes >= default_collect_interval || prev_sweep_full != 0)) ||
+            check_heap_size(live_sz_ub, live_sz_est)) &&
+            gc_num.pause > 1
+        {
+            gc_update_heap_size(live_sz_ub, live_sz_est);
+
+            recollect = full;
+
+            if large_frontier {
+                gc_num.interval = last_long_collect_interval;
+            }
+
+            if not_freed_enough || large_frontier {
+                if gc_num.interval < DEFAULT_COLLECT_INTERVAL as usize {
+                    gc_num.interval = DEFAULT_COLLECT_INTERVAL as usize;
+                } else if gc_num.interval <= 2 * (MAX_COLLECT_INTERVAL / 5) {
+                    gc_num.interval = 5 * (gc_num.interval / 2);
+                }
+            }
+
+            last_long_collect_interval = gc_num.interval;
+            sweep_full = true;
+        } else {
+            gc_num.interval = DEFAULT_COLLECT_INTERVAL as usize / 2;
+            // sweep_full = gc_sweep_always_full;
+        }
+
+        if sweep_full {
+            unsafe {
+                perm_scanned_bytes = 0;
+            }
+        }
+
+        unsafe {
+            scanned_bytes = 0;
+        }
+        
         // sweep
-        self.sweep(full);
+        self.sweep(sweep_full);
 
         // writeback stats
-        self.writeback_stats(t0, full, recollect);
+        self.writeback_stats(t0, sweep_full, recollect, actual_allocd, estimate_freed);
 
         recollect
     }
@@ -892,14 +953,15 @@ impl<'a> Gc2<'a> {
     fn writeback_stats(&mut self,
                        t0: u64,
                        full: bool,
-                       recollect: bool) {
+                       recollect: bool,
+                       actual_allocd: i64,
+                       estimate_freed: i64) {
         let gc_end_t = hrtime();
         let pause = gc_end_t - t0;
         unsafe {
             gc_final_pause_end(t0, gc_end_t);
         }
-        // Gc2::time_sweep_pause(gc_end_t, actual_allocd, live_bytes, estimate_freed, full);
-        Gc2::time_sweep_pause(gc_end_t, 0, 0, full);
+        Gc2::time_sweep_pause(gc_end_t, actual_allocd, estimate_freed, full);
         unsafe {
             gc_num.full_sweep += full as libc::c_int;
             prev_sweep_full += full as libc::c_int;
@@ -1948,10 +2010,11 @@ impl<'a> Gc2<'a> {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_weakrefs();
         }
-
+        
         println!("sweeping malloc'd arrays");
         self.sweep_malloced_arrays();
         return;
+        
         println!("sweeping bigvals");
         self.sweep_bigvals(full);
         /*

@@ -410,8 +410,8 @@ int prev_sweep_full = 1;
 int64_t live_bytes = 0;
 static int64_t promoted_bytes = 0;
 
-static int64_t last_full_live_ub = 0;
-static int64_t last_full_live_est = 0;
+int64_t last_full_live_ub = 0;
+int64_t last_full_live_est = 0;
 // upper bound and estimated live object sizes
 // This heuristic should be really unlikely to trigger.
 // However, this should be simple enough to trigger a full collection
@@ -503,7 +503,9 @@ int jl_gc_classify_pools(size_t sz, int *osize)
     size_t allocsz = sz + sizeof(jl_taggedvalue_t);
     int klass = jl_gc_szclass(allocsz);
     *osize = jl_gc_sizeclasses[klass];
-    return (int)(intptr_t)(&((jl_ptls_t)0)->heap.norm_pools[klass]);
+    // ACHTUNG: dirty hack
+    // Note: resulting offset is _never used because of how our pool allocation works
+    return 0; // (int)(intptr_t)(&((jl_ptls_t)0)->heap.norm_pools[klass]);
 }
 
 // sweep phase
@@ -833,6 +835,7 @@ JL_DLLEXPORT jl_value_t *(jl_gc_alloc)(jl_ptls_t ptls, size_t sz, void *ty)
 // Per-thread initialization (when threading is fully implemented)
 void jl_mk_thread_heap(jl_ptls_t ptls)
 {
+  /*
     jl_thread_heap_t *heap = &ptls->heap;
     jl_gc_pool_t *p = heap->norm_pools;
     for(int i=0; i < JL_GC_N_POOLS; i++) {
@@ -852,6 +855,7 @@ void jl_mk_thread_heap(jl_ptls_t ptls)
     heap->last_remset = &heap->_remset[1];
     arraylist_new(heap->remset, 0);
     arraylist_new(heap->last_remset, 0);
+  */
     arraylist_new(&ptls->finalizers, 0);
 }
 
@@ -1053,7 +1057,7 @@ jl_value_t *jl_gc_realloc_string(jl_value_t *s, size_t sz)
                                        1, s, 0);
     newbig->sz = allocsz;
     newbig->age = 0;
-    gc_big_object_link(newbig, &ptls->heap.big_objects);
+    neptune_push_big_object(ptls->tl_gcs, newbig);
     jl_value_t *snew = jl_valueof(&newbig->header);
     *(size_t*)snew = sz;
     return snew;

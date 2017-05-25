@@ -487,6 +487,9 @@ extern {
     #[cfg(gc_debug_env)]
     pub fn gc_scrub_record_task(ta: * mut JlTask);
 
+    #[cfg(gc_debug_env)]
+    pub fn gc_debug_check_pool() -> c_int;
+
     // set type of a value by setting the tag
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
     pub fn np_jl_svec_data(v: * mut JlValue) -> * mut * mut JlValue;
@@ -729,6 +732,7 @@ pub type sig_atomic_t = c_int;
 
 #[repr(u8)]
 pub enum GcState {
+    NonGc = 0, // GC is not running
     Waiting = 1, // thread is waiting for GC
     Safe = 2, // thread is running unmanaged code that can be executed simultaneously with GC
 }
@@ -995,9 +999,14 @@ pub unsafe extern fn jl_gc_setmark(tls: &mut JlTLS, v: * mut JlValue) {
 }
 
 //----------------------------------------------------------------------------------
-// Weak refs
+// Push objects to heap for becoming managed
 
 #[no_mangle]
 pub extern fn neptune_push_weakref(gc: &mut Gc2, wr: &mut WeakRef) {
     gc.push_weakref(wr);
+}
+
+#[no_mangle]
+pub unsafe extern fn neptune_push_big_object<'a>(gc: &mut Gc2<'a>, b: &'a mut BigVal) {
+    gc.heap.big_objects.push(b);
 }
