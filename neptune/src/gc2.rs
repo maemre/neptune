@@ -24,6 +24,8 @@ const GC_OLD_MARKED: u8 = (GC_OLD | GC_MARKED);
 
 const MAX_MARK_DEPTH: i32 = 400;
 
+const DEFAULT_COLLECT_INTERVAL: isize = 5600 * 1024 * 8;
+
 // offset for aligning data in page to 16 bytes (JL_SMALL_BYTE_ALIGNMENT) after tag.
 pub const GC_PAGE_OFFSET: usize = (JL_SMALL_BYTE_ALIGNMENT - (SIZE_OF_JLTAGGEDVALUE % JL_SMALL_BYTE_ALIGNMENT));
 
@@ -548,7 +550,7 @@ impl<'a> Gc2<'a> {
            in_finalizer: false,
            disable_gc: false,
            tls: tls,
-           allocd: 1 << 17, // hit it really quickly the first time
+           allocd: - DEFAULT_COLLECT_INTERVAL,
            mark_stack: Vec::new(),
         }
     }
