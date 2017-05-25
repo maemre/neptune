@@ -12,6 +12,8 @@ use std::ffi::CStr;
 use std::ops::Range;
 use util::*;
 
+const PURGE_FREED_MEMORY: bool = true;
+
 const TAG_BITS: u8 = 2; // number of tag bits
 const TAG_RANGE: Range<u8> = 0..TAG_BITS;
 const GC_N_POOLS: usize = 41;
@@ -578,7 +580,7 @@ impl<'a> Gc2<'a> {
             unsafe {
                 jl_gc_collect(0);
             }
-            self.allocd -= 1 << 20;
+            self.allocd = - DEFAULT_COLLECT_INTERVAL;
             println!("collected small");
         }
         let v = if allocsz <= GC_MAX_SZCLASS + mem::size_of::<JlTaggedValue>() {
@@ -1201,7 +1203,9 @@ impl<'a> Gc2<'a> {
 
         let (tag, mark_mode) = if get_mark_reset_age() != 0 {
             // reset the object's age to young, as if it is just allocated
-            (tag | GC_MARKED as usize, GC_MARKED)
+            let mut t = tag.clone();
+            t.set_tag(GC_MARKED);
+            (t, GC_MARKED)
         } else {
             let mark_mode = if tag.old() {
                 GC_OLD_MARKED
@@ -1323,27 +1327,24 @@ impl<'a> Gc2<'a> {
         };
 
         let mut i = 1;
-
+        
         while i < m.bindings.size {
-            if HTable::is_not_found(table[i]) {
-                i += 2;
-                continue;
-            }
+            if ! HTable::is_not_found(table[i]) {
+                let b = unsafe {
+                    JlBinding::from_jlvalue_mut(&mut *table[i])
+                };
+                self.setmark_buf(b.as_mut_jlvalue(), bits, mem::size_of::<JlBinding>());
+                let vb = as_mut_jltaggedvalue(b.as_mut_jlvalue());
+                verify_parent!("module", m.as_jlvalue(), &unsafe { mem::transmute(vb) }, "binding_buff");
 
-            let b = unsafe {
-                JlBinding::from_jlvalue_mut(&mut *table[i])
-            };
-            self.setmark_buf(b.as_mut_jlvalue(), bits, mem::size_of::<JlBinding>());
-            let vb = as_mut_jltaggedvalue(b.as_mut_jlvalue());
-            verify_parent!("module", m.as_jlvalue(), &unsafe { mem::transmute(vb) }, "binding_buff");
-            // In C, there is `(void) vb;` here
-            if ! b.value.is_null() {
-                verify_parent!("module", m.as_jlvalue(), &b.value, format!("binding({})", CStr::from_ptr(np_jl_symbol_name(b.name)).to_str().unwrap()));
-                refyoung |= self.push_root(b.value, d);
-            }
+                if ! b.value.is_null() {
+                    verify_parent!("module", m.as_jlvalue(), &b.value, format!("binding({})", CStr::from_ptr(np_jl_symbol_name(b.name)).to_str().unwrap()));
+                    refyoung |= self.push_root(b.value, d);
+                }
 
-            if ! b.globalref.is_null() {
-                refyoung |= self.push_root(b.globalref, d);
+                if ! b.globalref.is_null() {
+                    refyoung |= self.push_root(b.globalref, d);
+                }
             }
 
             i += 2;
@@ -1852,7 +1853,6 @@ impl<'a> Gc2<'a> {
             };
 
             if ! tag.marked() {
-                println!("freeing malloc'd array @{:?}", ma[i].a);
                 let a = unsafe {
                     &mut *ma.swap_remove(i).a
                 };
@@ -1869,6 +1869,12 @@ impl<'a> Gc2<'a> {
 
     fn free_array(a: &mut JlArray) {
         if a.flags.how() == AllocStyle::MallocBuffer {
+            if PURGE_FREED_MEMORY {
+                unsafe {
+                    libc::memset(a.data, 0, a.length * a.elsize as usize);
+                }
+            }
+            
             let d = unsafe {
                 (a.data as * mut u8).offset(- (a.offset as isize * a.elsize as isize)) as * mut libc::c_void
             };
@@ -1931,7 +1937,7 @@ impl<'a> Gc2<'a> {
         self.heap.remset.push(tag.mut_value()); // we use get_value instead of directly root to make borrow checker happy
         self.heap.remset_nptr += 1; // conservative, in case of root being a pointer
     }
-    
+
     #[inline(always)]
     pub fn queue_binding(&mut self, binding: &'a mut JlBinding<'a>) {
         let tag = unsafe {

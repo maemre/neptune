@@ -500,6 +500,7 @@ extern {
     pub static jl_emptytuple_type: * mut JlDatatype;
     pub static jl_datatype_type: * mut JlDatatype;
 
+    pub static jl_core_module: * mut JlModule;
     pub static jl_main_module: * mut JlModule;
     pub static jl_internal_main_module: * mut JlModule;
 
