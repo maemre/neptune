@@ -16,4 +16,12 @@ void neptune_free_page(void * page);
 void neptune_queue_root(tl_gcs_t *gc, jl_value_t * root);
 void neptune_queue_binding(tl_gcs_t *gc, jl_binding_t * binding);
 
+// weakrefs
+void neptune_push_weakref(tl_gcs_t *gc, jl_weakref_t *wr);
+
+// external marking stuff
+void neptune_visit_mark_stack(tl_gcs_t *gc);
+void neptune_mark_roots(tl_gcs_t *gc);
+void neptune_mark_thread_local(tl_gcs_t *gc, tl_gcs_t *gc2);
+
 #endif // NEPTUNE_H

@@ -452,7 +452,7 @@ pub struct ThreadHeap<'a> {
     // pools
     pools: Vec<GcPool<'a>>, // This has size GC_N_POOLS!, could have been an array, but copy only implemented for simpler things, so use a vec
     // weak refs
-    weak_refs: Vec<WeakRef>,
+    weak_refs: Vec<* mut WeakRef>,
     // malloc'd arrays
     mallocarrays: Vec<MallocArray>,
     mafreelist: Vec<MallocArray>,
@@ -486,12 +486,13 @@ impl<'a> ThreadHeap<'a> {
     }
 }
 
+#[repr(C)]
 pub struct GcMarkCache {
     // thread-local statistics, will be merged into global during stop-the-world
-    perm_scanned_bytes: usize,
-    scanned_bytes: usize,
-    nbig_obj: usize, // # of queued big objects to be moved to old gen.
-    big_obj: [* mut BigVal; 1024],
+    pub perm_scanned_bytes: usize,
+    pub scanned_bytes: usize,
+    pub nbig_obj: usize, // # of queued big objects to be moved to old gen.
+    pub big_obj: [* mut BigVal; 1024],
 }
 
 impl GcMarkCache {
@@ -527,12 +528,8 @@ pub struct Gc2<'a> {
     gc_state: GcState,
     in_finalizer: bool,
     disable_gc: bool,
-    // Finalizers belong to here
-    finalizers: Vec<Finalizer<'a>>,
-    // Counter to disable finalizers on the current thread
-    finalizers_inhibited: libc::c_int,
-    // parent pointer to thread-local storage for other fields, if necessary
-    // we can access stack base etc. from here (?)
+    // parent pointer to thread-local storage for other fields
+    // we can access stack base etc. from here
     tls: &'static mut JlTLS,
     // amount of allocation till next collection
     allocd: isize,
@@ -550,8 +547,6 @@ impl<'a> Gc2<'a> {
            gc_state: GcState::Safe,
            in_finalizer: false,
            disable_gc: false,
-           finalizers: Vec::new(),
-           finalizers_inhibited: 0,
            tls: tls,
            allocd: 1 << 17, // hit it really quickly the first time
            mark_stack: Vec::new(),
@@ -576,10 +571,12 @@ impl<'a> Gc2<'a> {
             None => panic!("Memory error: requested object is too large to represent with native pointer size")
         };
         // TODO: make this better, currently we are collecting for every MB
-        self.allocd -= allocsz as isize;
-        if self.allocd < 0 {
-            self.collect_small();
-            self.allocd += 1 << 20;
+        self.allocd += allocsz as isize;
+        if self.allocd > 0 {
+            unsafe {
+                jl_gc_collect(0);
+            }
+            self.allocd -= 1 << 20;
             println!("collected small");
         }
         let v = if allocsz <= GC_MAX_SZCLASS + mem::size_of::<JlTaggedValue>() {
@@ -722,6 +719,10 @@ impl<'a> Gc2<'a> {
     pub fn collect(&mut self, full: bool) -> bool {
         let t0 = hrtime();
         let recollect = false;
+
+        println!("commence collection");
+        debug_assert!(self.mark_stack.is_empty());
+        
         // julia's gc.c does the following:
         // 1. fix GC bits of objects in the memset
         // 2.1 mark every object in the last_remsets and rem_binding
@@ -739,7 +740,7 @@ impl<'a> Gc2<'a> {
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             self.mark_remset(tl_gc); // TODO: make this just tl_gc to separate marking even better
-            tl_gc.mark_thread_local();
+            self.mark_thread_local(tl_gc); // TODO: separate these from self
         }
 
         // walk the roots
@@ -795,7 +796,11 @@ impl<'a> Gc2<'a> {
         set_mark_reset_age(0);
         // gc_settime_postmark_end()
 
-        // self.gc_sync_all_caches_nolock()
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * t.tl_gcs };
+            // this is self, not tl_gc!
+            self.sync_cache_nolock(&mut tl_gc.cache);
+        }
 
         // TODO:set a couple stuff, line 1840 of gc.c
 
@@ -814,6 +819,40 @@ impl<'a> Gc2<'a> {
         recollect
     }
 
+    fn sync_cache_nolock(&mut self, cache: &mut GcMarkCache) {
+        let nbig = cache.nbig_obj;
+
+        for i in 0..nbig {
+            let ptr = cache.big_obj[i].clone();
+            let hdr = unsafe {
+                &mut *((ptr as usize).clear_tag(1) as * mut BigVal)
+            };
+
+            // In C: unlink hdr here using swap_remove, gc_big_object_unlink(hdr)
+            // we don't do it because we don't use next pointers.
+
+            if ((ptr as usize) & 1) != 0 {
+                self.heap.big_objects.push(hdr);
+            } else {
+                // move from `big_objects` to `big_objects_marked`
+                unsafe {
+                    // TODO: make thread-safe
+                    big_objects_marked.as_mut().unwrap().push(hdr);
+                }
+            }
+
+            cache.nbig_obj = 0;
+
+            unsafe {
+                perm_scanned_bytes += cache.perm_scanned_bytes;
+                scanned_bytes += cache.scanned_bytes;
+            }
+
+            cache.perm_scanned_bytes = 0;
+            cache.scanned_bytes = 0;
+        }
+    }
+    
     fn mark_object_list(&mut self, list: * mut JlArrayList, start: usize) {
         let l = unsafe { &mut *list };
         let len = l.len;
@@ -1178,7 +1217,7 @@ impl<'a> Gc2<'a> {
         ! old_tag.marked()
     }
 
-    fn setmark_buf(&mut self, o: * mut JlValue, mark_mode: u8, minsz: usize) {
+    pub fn setmark_buf(&mut self, o: * mut JlValue, mark_mode: u8, minsz: usize) {
         let buf = unsafe {
             &mut *as_mut_jltaggedvalue(o)
         };
@@ -1467,12 +1506,12 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    fn mark_thread_local(&mut self) {
-        let m = self.tls.current_module.clone();
-        let ct = self.tls.current_task.clone();
-        let rt = self.tls.root_task.clone();
-        let exn = self.tls.exception_in_transit.clone();
-        let ta = self.tls.task_arg_in_transit.clone();
+    pub fn mark_thread_local(&mut self, other: &mut Gc2) {
+        let m = other.tls.current_module.clone();
+        let ct = other.tls.current_task.clone();
+        let rt = other.tls.root_task.clone();
+        let exn = other.tls.exception_in_transit.clone();
+        let ta = other.tls.task_arg_in_transit.clone();
 
         self.push_root_if_not_null(m, 0);
         self.push_root_if_not_null(ct, 0);
@@ -1504,9 +1543,12 @@ impl<'a> Gc2<'a> {
     fn gc_sync_cache(&mut self) {
         // TODO: ACHTUNG this may cause some races or broken synchronization
         // TODO: move marked big objects in cache to big_object marked
+        // ACHTUNG: breaking linearity via unsafe
+        let cache = unsafe { &mut *(&mut self.cache as * mut GcMarkCache) };
+        self.sync_cache_nolock(cache);
     }
 
-    fn mark_roots(&mut self) {
+    pub fn mark_roots(&mut self) {
         // modules
         self.push_root(unsafe { (*jl_main_module).as_mut_jlvalue() }, 0);
         self.push_root(unsafe { (*jl_internal_main_module).as_mut_jlvalue() }, 0);
@@ -1543,7 +1585,8 @@ impl<'a> Gc2<'a> {
         false
     }
 
-    fn visit_mark_stack(&mut self) {
+    /// Visit all objects queued to the mark stack
+    pub fn visit_mark_stack(&mut self) {
         while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
             let v = self.mark_stack.pop().unwrap();
             let header = unsafe { &*as_jltaggedvalue(v) }.read_header();
@@ -1749,8 +1792,8 @@ impl<'a> Gc2<'a> {
     fn sweep_weakrefs(&mut self) {
         let mut i = 0;
         while i < self.heap.weak_refs.len() {
-            if unsafe { (* as_jltaggedvalue(self.heap.weak_refs[i].as_jlvalue())).marked() } {
-                let ref mut wr = self.heap.weak_refs[i];
+            if unsafe { (* as_jltaggedvalue((&*self.heap.weak_refs[i]).as_jlvalue())).marked() } {
+                let wr = unsafe { &mut *self.heap.weak_refs[i] };
                 // weakref is alive
                 if ! unsafe { (* as_jltaggedvalue(wr.value)).marked() } {
                     // however, referenced value is dead, so invalidate weakref
@@ -1899,5 +1942,10 @@ impl<'a> Gc2<'a> {
         tag.header.get_mut().set_tag(GC_MARKED);
 
         self.heap.rem_bindings.push(binding);
+    }
+
+    #[inline(always)]
+    pub fn push_weakref(&mut self, wr: &mut WeakRef) {
+        self.heap.weak_refs.push(wr);
     }
 }

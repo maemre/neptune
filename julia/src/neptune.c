@@ -44,3 +44,9 @@ void np_corruption_fail(jl_datatype_t *vt)
 void np_call_finalizer(void * fin, void *p) {
   ((void (*)(void*))fin)(jl_data_ptr(p));
 }
+
+void neptune_setmark_buf(tl_gcs_t *gc, void *buf, uint8_t mark_mode, size_t minsz);
+
+void gc_setmark_buf(jl_ptls_t ptls, void *buf, uint8_t mark_mode, size_t minsz) {
+  neptune_setmark_buf(ptls->tl_gcs, buf, mark_mode, minsz);
+}

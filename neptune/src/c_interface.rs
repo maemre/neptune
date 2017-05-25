@@ -460,6 +460,8 @@ extern {
     // mark boxed caches, which don't contain any pointers hence are terminal nodes
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
 
+    pub fn jl_gc_collect(full: c_int);
+    
     #[cfg(gc_debug_env)]
     pub fn gc_scrub_record_task(ta: * mut JlTask);
 
@@ -520,6 +522,8 @@ extern {
     pub static mut gc_num: GcNum;
     pub static mut live_bytes: i64;
     pub static mut prev_sweep_full: libc::c_int;
+    pub static mut perm_scanned_bytes: usize;
+    pub static mut scanned_bytes: usize;
 
     pub static mut finalizer_list_marked: JlArrayList;
     pub static mut to_finalize: JlArrayList;
@@ -603,23 +607,6 @@ pub fn gc_init<'a>(page_size: usize) -> Box<Gc<'a>> {
 // Clean up all the memory, the Gc object passed becomes unusable.
 // Unfortunately, C cannot tell this.
 pub extern fn gc_drop(gc: Box<Gc>) {
-}
-
-// Cache of thread local change to global metadata during GC
-// This were getting sync'd after marking in Julia GC
-#[repr(C)]
-pub struct GcMarkCache {
-    pub perm_scanned_bytes: usize,
-    pub scanned_bytes: usize,
-    pub nbig_obj: usize,
-    // array of queued big object to be moved between the young list
-    // and the old list. We use low bit to track whether the object
-    // should be moved so an object can and should be moved to this
-    // list after mark bit is flipped to 1 atomically. This and the
-    // sync after marking guarantee that single objects can only
-    // appear once in the lists (the mark bit cannot be cleared
-    // without sweeping).
-    pub big_obj: [*const c_void; 1024],
 }
 
 const AL_N_INLINE: usize = 29;
@@ -802,10 +789,20 @@ impl<'a> DerefMut for JlRegionArray<'a> {
 }
 
 //------------------------------------------------------------------------------
+// Global GC objects
+pub static mut big_objects_marked: Option<Vec<* mut BigVal>> = None;
+
+//------------------------------------------------------------------------------
 // Page manager
 
 #[no_mangle]
 pub unsafe extern fn neptune_init_page_mgr() {
+    // piggybacking here, TODO: move to gc_init
+    unsafe {
+        big_objects_marked = Some(Vec::new());
+    }
+    // end of gc_init
+    
     println!("page offset: {}", GC_PAGE_OFFSET);
 
     PAGE_MGR = Some(PageMgr::new());
@@ -917,6 +914,7 @@ pub extern fn neptune_big_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize) -> &
 
 #[no_mangle]
 pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static mut JlTLS) -> Box<Gc2<'a>> {
+    println!("{} {}", mem::size_of::<JlSVec>(), mem::size_of::<JlTask>());
     let pg_mgr = unsafe {
         PAGE_MGR.as_mut().unwrap()
     };
@@ -935,6 +933,26 @@ pub unsafe extern fn jl_gc_track_malloced_array(tls: &'static mut JlTLS, a: * mu
     (*tls.tl_gcs).track_malloced_array(a);
 }
 
+#[no_mangle]
+pub extern fn neptune_visit_mark_stack(gc: &mut Gc2) {
+    gc.visit_mark_stack();
+}
+
+#[no_mangle]
+pub extern fn neptune_mark_roots(gc: &mut Gc2) {
+    gc.mark_roots();
+}
+
+#[no_mangle]
+pub extern fn neptune_mark_thread_local(gc: &mut Gc2, gc2: &mut Gc2) {
+    gc.mark_thread_local(gc2);
+}
+
+#[no_mangle]
+pub extern fn neptune_setmark_buf(gc: &mut Gc2, o: * mut JlValue, mark_mode: u8, minsz: usize) {
+    gc.setmark_buf(o, mark_mode, minsz);
+}
+
 //----------------------------------------------------------------------------------
 // Write barrier entry points
 #[no_mangle]
@@ -951,4 +969,12 @@ pub extern fn neptune_queue_binding<'a>(gc: &mut Gc2<'a>, binding: &'a mut JlBin
 pub unsafe extern fn jl_gc_setmark(tls: &mut JlTLS, v: * mut JlValue) {
     let gc = &mut *tls.tl_gcs;
     gc.mark_concurrently(v);
+}
+
+//----------------------------------------------------------------------------------
+// Weak refs
+
+#[no_mangle]
+pub extern fn neptune_push_weakref(gc: &mut Gc2, wr: &mut WeakRef) {
+    gc.push_weakref(wr);
 }
