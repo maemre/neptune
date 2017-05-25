@@ -1281,7 +1281,7 @@ impl<'a> Gc2<'a> {
 
     // update metadata of the *marked* big object
     fn setmark_big(&mut self, o: * mut JlTaggedValue, mark_mode: u8) {
-        debug_assert!(unsafe { self.pg_mgr.find_pagemeta(o).is_some() }, "Tried to process marked pool-allocated object as marked big object");
+        debug_assert!(unsafe { self.pg_mgr.find_pagemeta(o).is_none() }, "Tried to process marked pool-allocated object as marked big object");
 
         let hdr = unsafe{
             BigVal::from_mut_jltaggedvalue(&mut *o)
