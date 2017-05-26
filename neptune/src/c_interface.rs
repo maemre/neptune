@@ -20,6 +20,7 @@ use core;
 use bit_field::BitField;
 use std::sync::atomic::*;
 use std::ffi::CString;
+use std::ffi::CStr;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -39,9 +40,30 @@ pub type JlValue = libc::c_void;
 pub type JlFunction = JlValue;
 
 // temporary, TODO: reify
-pub type JlSym = libc::c_void;
 pub type JlHandler = libc::c_void;
 pub type JlTypeMapEntry = libc::c_void;
+
+#[repr(C)]
+pub struct JlSym {
+    left: * mut JlSym,
+    right: * mut JlSym,
+    hash: usize,
+}
+
+impl JlSym {
+    pub fn name(&self) -> &CStr {
+        unsafe {
+            CStr::from_ptr((self as * const JlSym).offset(1) as * const c_char)
+        }
+    }
+
+    pub fn sname(&self) -> Option<&str> {
+        self.name().to_str().ok()
+    }
+}
+
+impl JlValueMarker for JlSym {
+}
 
 #[repr(C)]
 pub struct JlModule {
