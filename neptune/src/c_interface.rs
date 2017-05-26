@@ -477,7 +477,16 @@ extern {
     pub fn gc_time_sweep_pause(gc_end_t: u64, actual_allocd: i64, live_bytes: i64, estimate_freed: i64, sweep_full: c_int);
     pub fn jl_gc_wait_for_the_world(); // wait for the world to stop
 
+    // access to julia's timing functions for profiling
     pub fn jl_hrtime() -> u64;
+
+    pub fn gc_settime_premark_end();
+    pub fn gc_time_mark_pause(t0: u64, scanned_bytes: usize, perm_scanned_bytes: usize); 
+    pub fn gc_settime_postmark_end();
+
+    pub fn gc_time_mallocd_array_start();
+    pub fn gc_time_count_mallocd_array(bits: u8);
+    pub fn gc_time_mallocd_array_end();
 
     // mark boxed caches, which don't contain any pointers hence are terminal nodes
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
@@ -552,12 +561,79 @@ extern {
     pub static mut live_bytes: i64;
     pub static mut promoted_bytes: i64;
     pub static mut prev_sweep_full: libc::c_int;
-    pub static mut perm_scanned_bytes: usize;
-    pub static mut scanned_bytes: usize;
+    pub static mut perm_scanned_bytes: usize; // static int found in gc.c
+    pub static mut scanned_bytes: usize; // static int found in gc.c
     pub static mut last_long_collect_interval: usize;
 
     pub static mut finalizer_list_marked: JlArrayList;
     pub static mut to_finalize: JlArrayList;
+}
+
+#[inline(always)]
+#[cfg(gc_time)]
+pub fn neptune_gc_settime_premark_end() {
+    println!("premark end!");
+    unsafe { gc_settime_premark_end() }
+}
+
+#[inline(always)]
+#[cfg(not(gc_time))]
+pub fn neptune_gc_settime_premark_end() {
+}
+
+#[inline(always)]
+#[cfg(gc_time)]
+pub fn neptune_gc_time_mark_pause(t0: u64, sb: usize, psb: usize) {
+    unsafe { gc_time_mark_pause(t0, sb, psb) }
+}
+
+#[inline(always)]
+#[cfg(not(gc_time))]
+pub fn neptune_gc_time_mark_pause(t0: u64, sb: usize, psb: usize) {
+}
+
+#[inline(always)]
+#[cfg(gc_time)]
+pub fn neptune_gc_settime_postmark_end() {
+    unsafe { gc_settime_postmark_end() }
+}
+
+#[inline(always)]
+#[cfg(not(gc_time))]
+pub fn neptune_gc_settime_postmark_end() {
+}
+
+#[inline(always)]
+#[cfg(gc_time)]
+pub fn neptune_gc_time_mallocd_array_start() {
+    unsafe { gc_time_mallocd_array_start() }
+}
+
+#[inline(always)]
+#[cfg(not(gc_time))]
+pub fn neptune_gc_time_mallocd_array_start() {
+}
+
+#[inline(always)]
+#[cfg(gc_time)]
+pub fn neptune_gc_time_mallocd_array_end() {
+    unsafe { gc_time_mallocd_array_end() }
+}
+
+#[inline(always)]
+#[cfg(not(gc_time))]
+pub fn neptune_gc_time_mallocd_array_end() {
+}
+
+#[inline(always)]
+#[cfg(gc_time)]
+pub fn neptune_gc_time_count_mallocd_array(bits: u8) {
+    unsafe { gc_time_count_mallocd_array(bits) }
+}
+
+#[inline(always)]
+#[cfg(not(gc_time))]
+pub fn neptune_gc_time_count_mallocd_array(bits: u8) {
 }
 
 #[inline(always)]
@@ -583,8 +659,15 @@ pub fn set_mark_reset_age(n: i32) {
 }
 
 #[inline(always)]
-pub fn hrtime() -> u64 {
+#[cfg(timing)]
+pub fn neptune_hrtime() -> u64 {
     unsafe { jl_hrtime() }
+}
+
+#[inline(always)]
+#[cfg(not(timing))]
+pub fn neptune_hrtime() -> u64 {
+  0
 }
 
 #[inline(always)]

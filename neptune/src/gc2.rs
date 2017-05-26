@@ -731,7 +731,7 @@ impl<'a> Gc2<'a> {
     }
 
     pub fn collect(&mut self, full: bool) -> bool {
-        let t0 = hrtime();
+        let t0 = neptune_hrtime();
         let last_perm_scanned_bytes = unsafe { perm_scanned_bytes } as i64;
 
         println!("commence collection");
@@ -758,8 +758,8 @@ impl<'a> Gc2<'a> {
             gc_num.since_sweep += (gc_num.allocd + gc_num.interval as i64) as u64;
         }
 
-        // gc_settime_premark_end
-        // gc_time_mark_pause(t0, scanned_bytes, perm_scanned_bytes)
+        neptune_gc_settime_premark_end();
+        neptune_gc_time_mark_pause(t0, unsafe { scanned_bytes }, unsafe { perm_scanned_bytes }); // TODO
 
         let actual_allocd = unsafe { gc_num.since_sweep } as i64;
         // walking roots is over, time for finalizers
@@ -805,7 +805,7 @@ impl<'a> Gc2<'a> {
         self.visit_mark_stack();
 
         set_mark_reset_age(0);
-        // gc_settime_postmark_end()
+        neptune_gc_settime_postmark_end();
 
         // flush everything in mark caches
         for t in unsafe { get_all_tls() } {
@@ -962,7 +962,7 @@ impl<'a> Gc2<'a> {
                        recollect: bool,
                        actual_allocd: i64,
                        estimate_freed: i64) {
-        let gc_end_t = hrtime();
+        let gc_end_t = neptune_hrtime();
         let pause = gc_end_t - t0;
         unsafe {
             gc_final_pause_end(t0, gc_end_t);
@@ -1902,12 +1902,12 @@ impl<'a> Gc2<'a> {
     }
 
     fn sweep_malloced_arrays(&mut self) {
-        // gc_time_mallocd_array_start()
+        neptune_gc_time_mallocd_array_start();
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_local_malloced_arrays();
         }
-        // gc_time_mallocd_array_end()
+        neptune_gc_time_mallocd_array_end();
     }
 
     fn sweep_local_malloced_arrays(&mut self) {
@@ -1931,7 +1931,7 @@ impl<'a> Gc2<'a> {
                 end -= 1;
             }
 
-            // gc_time_count_mallocd_array(tag.tag())
+            neptune_gc_time_count_mallocd_array(tag.tag())
         }
     }
 
