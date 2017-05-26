@@ -7,6 +7,7 @@ use bit_field::BitField;
 use alloc;
 use std::intrinsics;
 use std::sync::atomic::*;
+use std::sync::*;
 use std::slice;
 use std::ffi::CStr;
 use std::ops::Range;
@@ -908,8 +909,8 @@ impl<'a> Gc2<'a> {
                 // move from `big_objects` to `big_objects_marked`
                 unsafe {
                     // TODO: fix my attempt at making thread-safe
-                    let bo: &mut Vec<* mut BigVal> = big_objects_marked.unwrap().lock().unwrap().as_mut();
-                    bo.push(hdr);
+                    let mut bo: MutexGuard<Vec<* mut BigVal>> = big_objects_marked.as_mut().unwrap().lock().unwrap();
+                    (*bo).push(hdr);
                 }
             }
 

@@ -919,7 +919,7 @@ impl<'a> DerefMut for JlRegionArray<'a> {
 
 //------------------------------------------------------------------------------
 // Global GC objects
-pub static mut big_objects_marked: Option<Arc<Mutex<Vec<* mut BigVal>>>> = None;
+pub static mut big_objects_marked: Option<Box<Mutex<Vec<* mut BigVal>>>> = None;
 
 //------------------------------------------------------------------------------
 // Page manager
@@ -928,7 +928,7 @@ pub static mut big_objects_marked: Option<Arc<Mutex<Vec<* mut BigVal>>>> = None;
 pub unsafe extern fn neptune_init_page_mgr() {
     // piggybacking here, TODO: move to gc_init
     unsafe {
-        big_objects_marked = Some(Arc::new(Mutex::new(Vec::new())));
+        big_objects_marked = Some(Box::new(Mutex::new(Vec::new())));
     }
     // end of gc_init
 
