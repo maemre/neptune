@@ -10,6 +10,8 @@
 #![feature(integer_atomics)]
 // for computing offsets between objects on a page
 #![feature(offset_to)]
+// to support const fns in globals and to enable const fn optimizations:
+#![feature(const_fn)]
 
 extern crate libc;
 extern crate bit_field;

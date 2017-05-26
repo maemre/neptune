@@ -11,3 +11,8 @@ threadpool = "1.0"
 [lib]
 name = "neptune"
 crate-type = ["staticlib"] # produce a static library that works with C
+
+[features]
+default = ["debug"]
+debug = ["memfence"]
+memfence = [] # to verify pools

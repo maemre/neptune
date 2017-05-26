@@ -1960,6 +1960,10 @@ impl<'a> Gc2<'a> {
         }
     }
 
+    #[cfg(not(debug_assertions))]
+    fn verify_module(&mut self, m: & mut JlModule) { }
+
+    #[cfg(debug_assertions)]
     fn verify_module(&mut self, m: & mut JlModule) {
         let mut table = unsafe {
             slice::from_raw_parts_mut(m.bindings.table, m.bindings.size)
@@ -2008,6 +2012,44 @@ impl<'a> Gc2<'a> {
         }
     }
 
+    fn scrub(&self) {
+    }
+
+    fn verify_tags(&mut self) {
+        if cfg!(feature = "memfence") {
+            // verify the freelist chains look valid
+
+            for t in unsafe { get_all_tls() } {
+                let gc = unsafe { &mut *t.tl_gcs };
+
+                for p in gc.heap.pools.iter_mut() {
+                    // for all fools, iterate its freelist
+                    let mut last_page = Page::of_raw::<u8>(::std::ptr::null());
+                    // TODO: have `allocated` and check it too, gc-debug.c:262
+                    for o in p.freelist.iter_mut() {
+                        // and assert that freelist values aren't gc-marked
+                        debug_assert!(! o.marked(), "There are marked objects in the freelists.");
+
+                        // TODO: verify that freelist pages are ordered
+
+                        let cur_page = Page::of::<JlTaggedValue>(o);
+
+                        if last_page != cur_page {
+                            // verify that the page metadata is correct
+                            let meta = unsafe {
+                                self.pg_mgr.find_pagemeta::<JlTaggedValue>(*o).expect("Pooled object doesn't belong to any memory region!")
+                            };
+
+                            debug_assert_eq!(p.osize, meta.osize as usize, "Pool and pagemeta object sizes don't match!");
+
+                            last_page = cur_page;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn sweep(&mut self, full: bool) {
         self.verify_module(unsafe { &mut *jl_core_module }); self.verify_module(unsafe { &mut *jl_main_module });
 
@@ -2019,17 +2061,16 @@ impl<'a> Gc2<'a> {
 
         println!("sweeping malloc'd arrays");
         self.sweep_malloced_arrays();
-        return;
 
         println!("sweeping bigvals");
         self.sweep_bigvals(full);
-        /*
+
         println!("scrubbing");
         self.scrub();
 
         println!("verifying tags");
         self.verify_tags();
-        */
+
         println!("sweeping pools");
         self.sweep_pools(full);
 
@@ -2039,9 +2080,7 @@ impl<'a> Gc2<'a> {
             tl_gc.sweep_remset(full);
         }
 
-        // TODO: sweep finalizer list
-
-        println!("sweep done")
+        println!("done sweeping")
     }
 
     // Functions for write barrier
