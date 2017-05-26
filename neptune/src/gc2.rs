@@ -12,7 +12,7 @@ use std::ffi::CStr;
 use std::ops::Range;
 use util::*;
 
-const PURGE_FREED_MEMORY: bool = true;
+const PURGE_FREED_MEMORY: bool = false;
 
 const TAG_BITS: u8 = 2; // number of tag bits
 const TAG_RANGE: Range<u8> = 0..TAG_BITS;
@@ -1429,12 +1429,12 @@ impl<'a> Gc2<'a> {
     unsafe fn gc_read_stack<T>(addr: * mut T, offset: usize, lb: usize, ub: usize) -> usize {
         let a = addr as usize;
         // correct address if it is within bounds
-        let addr_ = if a >= lb && a < ub {
+        let real_addr = if a >= lb && a < ub {
             a + offset
         } else {
             a
         };
-        *mem::transmute::<usize, * const usize>(addr_)
+        *mem::transmute::<usize, * const usize>(real_addr)
     }
 
     fn gc_mark_stack(&mut self, sinit: * mut GcFrame, offset: usize, lb: usize, ub: usize, d: i32) {
@@ -1445,7 +1445,7 @@ impl<'a> Gc2<'a> {
 
         while ! s.is_null() {
             let nroots = unsafe {
-                Gc2::gc_read_stack((&mut (&mut *s).nroots) as * mut usize as * mut libc::c_void, offset, lb, ub)
+                Gc2::gc_read_stack(&mut (&mut *s).nroots, offset, lb, ub)
             };
             let nr = nroots >> 1;
             let rts = unsafe {
@@ -1852,15 +1852,15 @@ impl<'a> Gc2<'a> {
                 &*as_jltaggedvalue((&*ma[i].a).as_jlvalue())
             };
 
-            if ! tag.marked() {
+            if tag.marked() {
+                i += 1;
+            } else {
                 let a = unsafe {
                     &mut *ma.swap_remove(i).a
                 };
                 debug_assert_eq!(a.flags.how(), AllocStyle::MallocBuffer);
                 Gc2::free_array(a);
                 end -= 1;
-            } else {
-                i += 1;
             }
 
             // gc_time_count_mallocd_array(tag.tag())
@@ -1892,7 +1892,57 @@ impl<'a> Gc2<'a> {
         }
     }
 
+    fn verify_module(&mut self, m: & mut JlModule) {
+        let mut table = unsafe {
+            slice::from_raw_parts_mut(m.bindings.table, m.bindings.size)
+        };
+
+        let mut i = 1;
+        let len = table.len();
+
+        // verify bindings
+        while i < len {
+            let entry = table[i];
+            if ! HTable::is_not_found(entry) {
+                let b = unsafe {
+                    JlBinding::from_jlvalue_mut(&mut *table[i])
+                };
+
+                let bname = unsafe { (*b.name).sname().unwrap() };
+                
+                let vb = unsafe { &*as_mut_jltaggedvalue(b.as_mut_jlvalue()) };
+
+                assert!(vb.marked(), format!("binding #{} is not marked!", bname));
+
+                if ! b.value.is_null() {
+                    let t = unsafe { &*as_jltaggedvalue((*b.value).as_jlvalue()) };
+
+                    if bname == "#println" {
+                        let pr = b.value;
+                        println!("Jackpot!");
+                    }
+                    
+                    assert!(t.marked(), format!("value of binding #{} is not marked!", bname));
+                }
+
+                // println!("Binding {} is marked", bname);
+            }
+
+            i += 2;
+        }
+
+        for using in m.usings.as_slice() {
+            assert!(unsafe { (&*as_jltaggedvalue(*using)).marked() }, "using is not marked!");
+        }
+
+        if ! m.parent.is_null() {
+            assert!(unsafe { (&*as_jltaggedvalue((&*m.parent).as_jlvalue())).marked() }, "parent module is not marked!");
+        }
+    }
+    
     fn sweep(&mut self, full: bool) {
+        self.verify_module(unsafe { &mut *jl_core_module }); self.verify_module(unsafe { &mut *jl_main_module });
+        
         println!("sweeping weak refs");
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
@@ -1901,7 +1951,7 @@ impl<'a> Gc2<'a> {
 
         println!("sweeping malloc'd arrays");
         self.sweep_malloced_arrays();
-
+        return;
         println!("sweeping bigvals");
         self.sweep_bigvals(full);
         /*
