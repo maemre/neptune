@@ -58,7 +58,7 @@ static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
 ];
 const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(), size_of isn't a const fn yet :(
 
-
+static GC_ALREADY_RUN: AtomicBool = AtomicBool::new(false);
 
 /*
  * in julia/src/julia.h:
@@ -598,9 +598,11 @@ impl<'a> Gc2<'a> {
 
         self.allocd += size as isize;
         if unsafe { intrinsics::unlikely(self.allocd > 0) || debug_check_pool() } {
-            println!("triggering periodic collection");
-            unsafe {
-                jl_gc_collect(0);
+            if cfg!(feature="run_only_once") && ! GC_ALREADY_RUN.load(Ordering::Relaxed) {
+                println!("triggering periodic collection");
+                unsafe {
+                    jl_gc_collect(0);
+                }
             }
         }
 
@@ -734,6 +736,12 @@ impl<'a> Gc2<'a> {
     pub fn collect(&mut self, full: bool) -> bool {
         let t0 = neptune_hrtime();
         let last_perm_scanned_bytes = unsafe { perm_scanned_bytes } as i64;
+
+        if cfg!(feature = "run_only_once") {
+            if GC_ALREADY_RUN.swap(true, Ordering::SeqCst) {
+                return false;
+            }
+        }
 
         println!("commence collection");
         debug_assert!(self.mark_stack.is_empty());
@@ -1858,6 +1866,8 @@ impl<'a> Gc2<'a> {
 
     // sweep bigvals local to this thread
     fn sweep_local_bigvals(&mut self, full: bool) {
+        // TODO: report statistics
+
         let mut nbig_obj = self.heap.big_objects.len();
         let mut i = 0;
         while i < nbig_obj {
@@ -1878,8 +1888,7 @@ impl<'a> Gc2<'a> {
             } else {
                 let b = self.heap.big_objects.swap_remove(i);
                 nbig_obj -= 1;
-                // TODO: fix this by adding some info to BigVals
-                // currently there might be double frees, one from Rust, one from us!
+
                 unsafe {
                     self.rust_free(b as * mut BigVal, b.size() + mem::size_of::<BigVal>());
                 }
@@ -2015,11 +2024,6 @@ impl<'a> Gc2<'a> {
 
                 if ! b.value.is_null() {
                     let t = unsafe { &*as_jltaggedvalue((*b.value).as_jlvalue()) };
-
-                    if bname == "#println" {
-                        let pr = b.value;
-                        println!("Jackpot!");
-                    }
 
                     assert!(t.marked(), format!("value of binding #{} is not marked!", bname));
                 }
