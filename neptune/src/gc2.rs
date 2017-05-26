@@ -907,8 +907,9 @@ impl<'a> Gc2<'a> {
             } else {
                 // move from `big_objects` to `big_objects_marked`
                 unsafe {
-                    // TODO: make thread-safe
-                    big_objects_marked.as_mut().unwrap().push(hdr);
+                    // TODO: fix my attempt at making thread-safe
+                    let bo: &mut Vec<* mut BigVal> = big_objects_marked.unwrap().lock().unwrap().as_mut();
+                    bo.push(hdr);
                 }
             }
 
