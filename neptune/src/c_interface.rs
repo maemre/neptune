@@ -483,12 +483,15 @@ extern {
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
 
     pub fn jl_gc_collect(full: c_int);
-    
+
     #[cfg(gc_debug_env)]
     pub fn gc_scrub_record_task(ta: * mut JlTask);
 
     #[cfg(gc_debug_env)]
     pub fn gc_debug_check_pool() -> c_int;
+
+    pub fn gc_check_heap_size(sz_ub: i64, sz_est: i64) -> c_int;
+    pub fn gc_update_heap_size(sz_ub: i64, sz_est: i64);
 
     // set type of a value by setting the tag
     pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
@@ -547,12 +550,26 @@ extern {
 
     pub static mut gc_num: GcNum;
     pub static mut live_bytes: i64;
+    pub static mut promoted_bytes: i64;
     pub static mut prev_sweep_full: libc::c_int;
     pub static mut perm_scanned_bytes: usize;
     pub static mut scanned_bytes: usize;
+    pub static mut last_long_collect_interval: usize;
 
     pub static mut finalizer_list_marked: JlArrayList;
     pub static mut to_finalize: JlArrayList;
+}
+
+#[inline(always)]
+#[cfg(debug_env)]
+pub fn debug_check_pool() -> bool {
+    gc_debug_check_pool() != 0
+}
+
+#[inline(always)]
+#[cfg(not(debug_env))]
+pub fn debug_check_pool() -> bool {
+    false
 }
 
 #[inline(always)]
@@ -730,9 +747,10 @@ type JlPTLS<'a> = Option<&'a JlTLS>; // this is just a pointer to thread-local s
 // Note: We represent sig_atomic_t as c_int since C99 standard says so.
 pub type sig_atomic_t = c_int;
 
+#[derive(PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum GcState {
-    NonGc = 0, // GC is not running
+    GcNotRunning = 0, // GC is not running
     Waiting = 1, // thread is waiting for GC
     Safe = 2, // thread is running unmanaged code that can be executed simultaneously with GC
 }
@@ -829,7 +847,7 @@ pub unsafe extern fn neptune_init_page_mgr() {
         big_objects_marked = Some(Vec::new());
     }
     // end of gc_init
-    
+
     println!("page offset: {}", GC_PAGE_OFFSET);
 
     PAGE_MGR = Some(PageMgr::new());

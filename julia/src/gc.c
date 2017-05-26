@@ -46,7 +46,7 @@ static jl_mutex_t finalizers_lock;
  */
 
 jl_gc_num_t gc_num = {0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static size_t last_long_collect_interval;
+size_t last_long_collect_interval;
 
 // List of marked big objects.  Not per-thread.  Accessed only by master thread.
 bigval_t *big_objects_marked = NULL;
@@ -408,7 +408,7 @@ int prev_sweep_full = 1;
 
 // Full collection heuristics
 int64_t live_bytes = 0;
-static int64_t promoted_bytes = 0;
+int64_t promoted_bytes = 0;
 
 int64_t last_full_live_ub = 0;
 int64_t last_full_live_est = 0;
@@ -418,7 +418,7 @@ int64_t last_full_live_est = 0;
 // when it's necessary if other heuristics are messed up.
 // It is also possible to take the total memory available into account
 // if necessary.
-STATIC_INLINE int gc_check_heap_size(int64_t sz_ub, int64_t sz_est)
+int gc_check_heap_size(int64_t sz_ub, int64_t sz_est)
 {
     if (__unlikely(!last_full_live_ub || last_full_live_ub > sz_ub)) {
         last_full_live_ub = sz_ub;
@@ -435,7 +435,7 @@ STATIC_INLINE int gc_check_heap_size(int64_t sz_ub, int64_t sz_est)
     return 0;
 }
 
-STATIC_INLINE void gc_update_heap_size(int64_t sz_ub, int64_t sz_est)
+void gc_update_heap_size(int64_t sz_ub, int64_t sz_est)
 {
     last_full_live_ub = sz_ub;
     last_full_live_est = sz_est;
@@ -599,12 +599,7 @@ static void jl_gc_mark_ptrfree(jl_ptls_t ptls)
 // Only one thread should be running in this function
 static int _jl_gc_collect(jl_ptls_t ptls, int full)
 {
-    uint64_t t0 = jl_hrtime();
-    int64_t last_perm_scanned_bytes = perm_scanned_bytes;
-
-    int recollect = neptune_gc_collect(ptls->tl_gcs, full);
-
-    return recollect;
+  return neptune_gc_collect(ptls->tl_gcs, full);
 
     // Below this is dead code!
 

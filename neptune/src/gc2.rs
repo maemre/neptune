@@ -589,14 +589,14 @@ impl<'a> Gc2<'a> {
     pub fn pool_alloc(&mut self, size: usize) -> &mut JlValue {
         let osize = size - mem::size_of::<JlTaggedValue>();
 
-        debug_assert_eq!(self.ptls.gc_state, 0); // make sure that GC is not working!
+        debug_assert_eq!(self.tls.gc_state, GcState::GcNotRunning); // make sure that GC is not working.
 
         if cfg!(memdebug) {
             return self.big_alloc(size);
         }
 
         self.allocd += size as isize;
-        if unsafe { intrinsics::unlikely(self.allocd > 0) || (if cfg!(gc_debug_env) { gc_debug_check_pool() != 0 } else false) } {
+        if unsafe { intrinsics::unlikely(self.allocd > 0) || debug_check_pool() } {
             println!("triggering periodic collection");
             unsafe {
                 jl_gc_collect(0);
@@ -606,7 +606,7 @@ impl<'a> Gc2<'a> {
         unsafe {
             gc_num.poolalloc += 1;
         }
-        
+
         let v = match self.find_pool(&osize) {
             Some(pool_index) => {
                 // TODO: check if pool is full, see below...
@@ -732,10 +732,11 @@ impl<'a> Gc2<'a> {
 
     pub fn collect(&mut self, full: bool) -> bool {
         let t0 = hrtime();
+        let last_perm_scanned_bytes = unsafe { perm_scanned_bytes } as i64;
 
         println!("commence collection");
         debug_assert!(self.mark_stack.is_empty());
-        
+
         // 1. fix GC bits of objects in the memset (a.k.a. premark)
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
@@ -760,7 +761,7 @@ impl<'a> Gc2<'a> {
         // gc_settime_premark_end
         // gc_time_mark_pause(t0, scanned_bytes, perm_scanned_bytes)
 
-        let actual_allocd = unsafe { gc_num.since_sweep };
+        let actual_allocd = unsafe { gc_num.since_sweep } as i64;
         // walking roots is over, time for finalizers
 
         // check for objects to finalize
@@ -814,21 +815,25 @@ impl<'a> Gc2<'a> {
         }
 
 
-        let live_sz_ub: i64 = live_bytes + actual_allocd;
-        let live_sz_est: i64 = scanned_bytes + perm_scanned_bytes;
+        let live_sz_ub: i64 = unsafe {
+            live_bytes + actual_allocd
+        };
+        let live_sz_est: i64 = unsafe {
+            (scanned_bytes + perm_scanned_bytes) as i64
+        };
         let estimate_freed: i64 = live_sz_ub - live_sz_est;
-        
+
         self.verify();
 
         // TODO: call gc_stats.*
-        
+
         // make a collection/sweep decision based on statistics
 
         // we want to free ~70% if possible.
         let not_freed_enough = estimate_freed < 7 * (actual_allocd/10);
         let mut nptr = 0;
         nptr += unsafe {
-            get_all_tls().iter().fold(0, |acc, &t| { acc + (&*t.tl_gcs).heap.remset_nptr })
+            get_all_tls().iter().fold(0, |acc, &ref t| { acc + (&*t.tl_gcs).heap.remset_nptr })
         };
 
         // if there are many intergenerational pointers then quick (not full, only young gen) sweep is not so quick
@@ -836,35 +841,36 @@ impl<'a> Gc2<'a> {
         let mut sweep_full = false;
         let mut recollect = false;
 
-        if (full || large_frontier ||
-            ((not_freed_enough || promoted_bytes >= gc_num.interval) &&
-             (promoted_bytes >= default_collect_interval || prev_sweep_full != 0)) ||
-            check_heap_size(live_sz_ub, live_sz_est)) &&
-            gc_num.pause > 1
-        {
-            gc_update_heap_size(live_sz_ub, live_sz_est);
+        unsafe {
+            if (full || large_frontier ||
+                ((not_freed_enough || promoted_bytes >= gc_num.interval as i64) &&
+                 (promoted_bytes >= DEFAULT_COLLECT_INTERVAL as i64 || prev_sweep_full != 0)) ||
+                gc_check_heap_size(live_sz_ub, live_sz_est) != 0) &&
+                gc_num.pause > 1
+            {
+                gc_update_heap_size(live_sz_ub, live_sz_est);
 
-            recollect = full;
+                recollect = full;
 
-            if large_frontier {
-                gc_num.interval = last_long_collect_interval;
-            }
-
-            if not_freed_enough || large_frontier {
-                if gc_num.interval < DEFAULT_COLLECT_INTERVAL as usize {
-                    gc_num.interval = DEFAULT_COLLECT_INTERVAL as usize;
-                } else if gc_num.interval <= 2 * (MAX_COLLECT_INTERVAL / 5) {
-                    gc_num.interval = 5 * (gc_num.interval / 2);
+                if large_frontier {
+                    gc_num.interval = last_long_collect_interval;
                 }
+
+                if not_freed_enough || large_frontier {
+                    if gc_num.interval < DEFAULT_COLLECT_INTERVAL as usize {
+                        gc_num.interval = DEFAULT_COLLECT_INTERVAL as usize;
+                    } else if gc_num.interval <= 2 * (MAX_COLLECT_INTERVAL / 5) {
+                        gc_num.interval = 5 * (gc_num.interval / 2);
+                    }
+                }
+
+                last_long_collect_interval = gc_num.interval;
+                sweep_full = true;
+            } else {
+                gc_num.interval = DEFAULT_COLLECT_INTERVAL as usize / 2;
+                // sweep_full = gc_sweep_always_full;
             }
-
-            last_long_collect_interval = gc_num.interval;
-            sweep_full = true;
-        } else {
-            gc_num.interval = DEFAULT_COLLECT_INTERVAL as usize / 2;
-            // sweep_full = gc_sweep_always_full;
         }
-
         if sweep_full {
             unsafe {
                 perm_scanned_bytes = 0;
@@ -874,7 +880,7 @@ impl<'a> Gc2<'a> {
         unsafe {
             scanned_bytes = 0;
         }
-        
+
         // sweep
         self.sweep(sweep_full);
 
@@ -917,7 +923,7 @@ impl<'a> Gc2<'a> {
             cache.scanned_bytes = 0;
         }
     }
-    
+
     fn mark_object_list(&mut self, list: * mut JlArrayList, start: usize) {
         let l = unsafe { &mut *list };
         let len = l.len;
@@ -1044,7 +1050,7 @@ impl<'a> Gc2<'a> {
         debug_assert!(! v.is_null());
         debug_assert_ne!(bits & GC_MARKED, 0);
         debug_assert_ne!(vt, jl_symbol_type); // should've checked in `gc_mark_obj`
-        
+
         if vt == jl_weakref_type {
             return // don't mark weakrefs
         }
@@ -1164,7 +1170,7 @@ impl<'a> Gc2<'a> {
         // We should implement something similar for simpler debugging
 
         debug_assert!(! e.is_null());
-        
+
         let o = unsafe { &mut *as_mut_jltaggedvalue(e) };
         // TODO: verify_val(v);
         let tag = o.read_header();
@@ -1290,7 +1296,7 @@ impl<'a> Gc2<'a> {
             &mut *as_mut_jltaggedvalue(o)
         };
         let tag = buf.read_header();
-        
+
         if tag.marked() {
             return;
         }
@@ -1389,7 +1395,7 @@ impl<'a> Gc2<'a> {
         };
 
         let mut i = 1;
-        
+
         while i < m.bindings.size {
             if ! HTable::is_not_found(table[i]) {
                 let b = unsafe {
@@ -1936,7 +1942,7 @@ impl<'a> Gc2<'a> {
                     libc::memset(a.data, 0, a.length * a.elsize as usize);
                 }
             }
-            
+
             let d = unsafe {
                 (a.data as * mut u8).offset(- (a.offset as isize * a.elsize as isize)) as * mut libc::c_void
             };
@@ -1971,7 +1977,7 @@ impl<'a> Gc2<'a> {
                 };
 
                 let bname = unsafe { (*b.name).sname().unwrap() };
-                
+
                 let vb = unsafe { &*as_mut_jltaggedvalue(b.as_mut_jlvalue()) };
 
                 assert!(vb.marked(), format!("binding #{} is not marked!", bname));
@@ -1983,7 +1989,7 @@ impl<'a> Gc2<'a> {
                         let pr = b.value;
                         println!("Jackpot!");
                     }
-                    
+
                     assert!(t.marked(), format!("value of binding #{} is not marked!", bname));
                 }
 
@@ -2001,20 +2007,20 @@ impl<'a> Gc2<'a> {
             assert!(unsafe { (&*as_jltaggedvalue((&*m.parent).as_jlvalue())).marked() }, "parent module is not marked!");
         }
     }
-    
+
     fn sweep(&mut self, full: bool) {
         self.verify_module(unsafe { &mut *jl_core_module }); self.verify_module(unsafe { &mut *jl_main_module });
-        
+
         println!("sweeping weak refs");
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_weakrefs();
         }
-        
+
         println!("sweeping malloc'd arrays");
         self.sweep_malloced_arrays();
         return;
-        
+
         println!("sweeping bigvals");
         self.sweep_bigvals(full);
         /*
