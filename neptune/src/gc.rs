@@ -260,6 +260,15 @@ impl BigVal {
         self.szOrAge.set_bits(0..2, age);
     }
 
+    /// Increment age while saturating it when it reaches the promotion age
+    #[inline(always)]
+    pub fn inc_age(&mut self) {
+        let age = self.szOrAge.get_bits(0..2);
+        if age < PROMOTE_AGE {
+            self.szOrAge.set_bits(0..2, age + 1);
+        }
+    }
+
     pub unsafe fn from_mut_jltaggedvalue(t: &mut JlTaggedValue) -> &mut Self {
         &mut *mem::transmute::<* mut JlTaggedValue, * mut BigVal>(t).offset(-1)
     }

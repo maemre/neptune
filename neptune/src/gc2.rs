@@ -119,11 +119,11 @@ impl JlTaggedValue {
         self.header.set_marked(flag);
     }
 
-    pub unsafe fn old(&self) -> bool {
+    pub fn old(&self) -> bool {
         self.header.old()
     }
 
-    pub unsafe fn set_old(&mut self, flag: bool) {
+    pub fn set_old(&mut self, flag: bool) {
         self.header.set_old(flag);
     }
 
@@ -1791,9 +1791,18 @@ impl<'a> Gc2<'a> {
                         let mut nfree = 0;
                         for o_idx in 0..n_obj {
                             let o = unsafe {
-                                mem::transmute::<&u8, &JlTaggedValue>(&page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
+                                mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
                             };
-                            if unsafe { ! o.marked() } {
+                            if o.marked() {
+                                // clear marks during sweep
+                                o.set_marked(false);
+
+                                if full || ! o.old() {
+                                    // it is a young object survived till next full sweep, promote it
+                                    o.set_old(true);
+                                }
+                                // TODO: better promotion, similar to original one in Julia
+                            } else {
                                 nfree += 1;
                             }
                         }
@@ -1841,6 +1850,10 @@ impl<'a> Gc2<'a> {
             };
             tl_gc.sweep_local_bigvals(full);
         }
+
+        if full {
+            // TODO: move all survivors from big_objects_marked to big_objects
+        }
     }
 
     // sweep bigvals local to this thread
@@ -1848,7 +1861,21 @@ impl<'a> Gc2<'a> {
         let mut nbig_obj = self.heap.big_objects.len();
         let mut i = 0;
         while i < nbig_obj {
+            // lots of repetition to make borrow checker happy
             if unsafe { self.heap.big_objects[i].taggedvalue().marked() } {
+                unsafe {
+                    self.heap.big_objects[i].mut_taggedvalue().set_marked(false);
+                }
+
+                if self.heap.big_objects[i].age() > PROMOTE_AGE {
+                    unsafe {
+                        self.heap.big_objects[i].mut_taggedvalue().set_old(true);
+                    }
+                }
+                self.heap.big_objects[i].inc_age();
+
+                i += 1;
+            } else {
                 let b = self.heap.big_objects.swap_remove(i);
                 nbig_obj -= 1;
                 // TODO: fix this by adding some info to BigVals
@@ -1856,8 +1883,6 @@ impl<'a> Gc2<'a> {
                 unsafe {
                     self.rust_free(b as * mut BigVal, b.size() + mem::size_of::<BigVal>());
                 }
-            } else {
-                i += 1;
             }
         }
     }

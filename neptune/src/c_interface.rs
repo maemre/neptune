@@ -470,6 +470,8 @@ pub const SIZE_OF_JLTAGGEDVALUE: usize = 8;
 
 pub const N_CALL_CACHE: usize = 4096; // from options.h
 
+pub const PROMOTE_AGE: usize = 1;
+
 extern {
     pub fn arraylist_push(a: * mut JlArrayList, e: * mut c_void);
 
