@@ -2136,34 +2136,34 @@ impl<'a> Gc2<'a> {
     fn sweep(&mut self, full: bool) {
         self.verify_module(unsafe { &mut *jl_core_module }); self.verify_module(unsafe { &mut *jl_main_module });
 
-        println!("sweeping weak refs");
+        // println!("sweeping weak refs");
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_weakrefs();
         }
 
         // println!("sweeping malloc'd arrays");
-        // self.sweep_malloced_arrays();
+        self.sweep_malloced_arrays();
 
-        println!("sweeping bigvals");
+        // println!("sweeping bigvals");
         self.sweep_bigvals(full);
 
-        println!("scrubbing");
+        // println!("scrubbing");
         self.scrub();
 
-        println!("verifying tags");
+        // println!("verifying tags");
         self.verify_tags();
 
         // println!("sweeping pools");
-        // self.sweep_pools(full);
+        self.sweep_pools(full);
 
         // println!("sweeping remsets");
-        // for t in unsafe { get_all_tls() } {
-        //     let tl_gc = unsafe { &mut * (*t).tl_gcs };
-        //     tl_gc.sweep_remset(full);
-        // }
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * (*t).tl_gcs };
+            tl_gc.sweep_remset(full);
+        }
 
-        println!("done sweeping")
+        // println!("done sweeping")
     }
 
     // Functions for write barrier
