@@ -677,9 +677,10 @@ impl<'a> Gc2<'a> {
         pool.freelist.reserve(meta.nfree as usize);
         // println!("object size: {}, computed size: {}, # free objects: {}", meta.osize, size, meta.nfree);
         for i in 0..(meta.nfree as usize) {
-            let v = unsafe {
+            let v: &mut JlTaggedValue = unsafe {
                 mem::transmute(&mut page.data[i * (size + padding) + GC_PAGE_OFFSET])
             };
+            v.set_tag(0);
             pool.freelist.push(v);
         }
     }
