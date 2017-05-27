@@ -598,7 +598,7 @@ impl<'a> Gc2<'a> {
 
         self.allocd += size as isize;
         if unsafe { intrinsics::unlikely(self.allocd > 0) || debug_check_pool() } {
-            if cfg!(feature="run_only_once") && ! GC_ALREADY_RUN.load(Ordering::Relaxed) {
+            if cfg!(feature="run_only_once") && ! GC_ALREADY_RUN.load(Ordering::SeqCst) {
                 println!("triggering periodic collection");
                 unsafe {
                     jl_gc_collect(0);
@@ -699,14 +699,34 @@ impl<'a> Gc2<'a> {
     }
 
     pub fn big_alloc(&mut self, size: usize) -> &mut JlValue {
-        let allocsz = mem::size_of::<BigVal>().checked_add(size)
+        // TODO: maybe_collect
+        let rawsz = mem::size_of::<BigVal>().checked_add(size)
             .expect(& format!("Cannot allocate a BigVal with size {} on this architecture", size));
+        // align size to cache byte alignment
+        let allocsz = llt_align(rawsz, JL_CACHE_BYTE_ALIGNMENT);
+
+        if unsafe { intrinsics::unlikely(rawsz < size) } {
+            panic!(format!("BigVal with size {} is too big to align to cache and use on this architecture", size));
+        }
+
         let (bv, tv) = unsafe {
             let ptr = self.rust_alloc::<BigVal>(allocsz);
             (*ptr).set_size(size);
+            (*ptr).set_age(0);
             let taggedvalue: &mut JlTaggedValue = (*ptr).mut_taggedvalue();
             (&mut *ptr, taggedvalue)
         };
+
+        // update stats
+        unsafe {
+            gc_num.allocd.fetch_add(allocsz as i64, Ordering::SeqCst);
+            gc_num.bigalloc += 1;
+        }
+
+        if cfg!(memdebug) {
+            // TODO: fill bigval with 0xEE
+        }
+
         self.heap.big_objects.push(bv);
         jl_value_of_mut(tv)
     }
@@ -722,7 +742,7 @@ impl<'a> Gc2<'a> {
     }
 
     // free an unmanaged pointer
-    pub unsafe fn rust_free<T>(&mut self, ptr: * mut T, size: usize) {
+    pub unsafe fn rust_free<T>(ptr: * mut T, size: usize) {
         alloc::heap::deallocate(mem::transmute::<* mut T, * mut u8>(ptr), size, 8);
     }
 
@@ -764,7 +784,8 @@ impl<'a> Gc2<'a> {
         self.visit_mark_stack(); // this function processes all the pushed roots
 
         unsafe {
-            gc_num.since_sweep += (gc_num.allocd + gc_num.interval as i64) as u64;
+            // this is deliberately not thread-safe
+            gc_num.since_sweep += (*gc_num.allocd.get_mut() + gc_num.interval as i64) as u64;
         }
 
         neptune_gc_settime_premark_end();
@@ -890,6 +911,8 @@ impl<'a> Gc2<'a> {
             scanned_bytes = 0;
         }
 
+        println!("collection decisions: sweep_full = {}, recollect = {}", sweep_full, recollect);
+
         // sweep
         self.sweep(sweep_full);
 
@@ -981,7 +1004,7 @@ impl<'a> Gc2<'a> {
         unsafe {
             gc_num.full_sweep += full as libc::c_int;
             prev_sweep_full += full as libc::c_int;
-            gc_num.allocd = - (gc_num.interval as i64);
+            *gc_num.allocd.get_mut() = - (gc_num.interval as i64);
             live_bytes += gc_num.since_sweep as i64 - gc_num.freed;
             gc_num.pause += (! recollect) as libc::c_int;
             gc_num.total_time += pause;
@@ -1860,37 +1883,53 @@ impl<'a> Gc2<'a> {
         }
 
         if full {
-            // TODO: move all survivors from big_objects_marked to big_objects
+            // sweep old bigvals
+            let mut bo: MutexGuard<Vec<* mut BigVal>> = unsafe {
+                big_objects_marked.as_mut().unwrap().lock().unwrap()
+            };
+            let big_objects = unsafe {
+                // make pointers managed, this trick is required to match type of self.heap.big_objects
+                mem::transmute::<&mut Vec<* mut BigVal>, &mut Vec<& mut BigVal>>(&mut *bo)
+            };
+            Gc2::sweep_big_list(&mut *big_objects, full);
+            // move all survivors from big_objects_marked to this thread's big_objects
+            self.heap.big_objects.append(&mut *big_objects);
         }
     }
 
     // sweep bigvals local to this thread
     fn sweep_local_bigvals(&mut self, full: bool) {
+        Gc2::sweep_big_list(&mut self.heap.big_objects, full);
+    }
+
+    fn sweep_big_list(list: &mut Vec<& mut BigVal>, full: bool) {
         // TODO: report statistics
 
-        let mut nbig_obj = self.heap.big_objects.len();
+        let mut nbig_obj = list.len();
         let mut i = 0;
         while i < nbig_obj {
             // lots of repetition to make borrow checker happy
-            if unsafe { self.heap.big_objects[i].taggedvalue().marked() } {
+            if unsafe { list[i].taggedvalue().marked() } {
                 unsafe {
-                    self.heap.big_objects[i].mut_taggedvalue().set_marked(false);
+                    list[i].mut_taggedvalue().set_marked(false);
                 }
 
-                if self.heap.big_objects[i].age() > PROMOTE_AGE {
+                if list[i].age() > PROMOTE_AGE {
                     unsafe {
-                        self.heap.big_objects[i].mut_taggedvalue().set_old(true);
+                        list[i].mut_taggedvalue().set_old(true);
                     }
                 }
-                self.heap.big_objects[i].inc_age();
-
+                list[i].inc_age();
                 i += 1;
             } else {
-                let b = self.heap.big_objects.swap_remove(i);
+                let b = list.swap_remove(i);
                 nbig_obj -= 1;
 
+                let begin = b.taggedvalue().get_value() as * const JlValue as usize;
+                println!("reclaimed 0x{:x} to 0x{:x}", begin, begin + b.size() + BigVal::true_size());
+
                 unsafe {
-                    self.rust_free(b as * mut BigVal, b.size() + mem::size_of::<BigVal>());
+                    Gc2::rust_free(b as * mut BigVal, b.allocd_size());
                 }
             }
         }
@@ -2090,8 +2129,8 @@ impl<'a> Gc2<'a> {
             tl_gc.sweep_weakrefs();
         }
 
-        println!("sweeping malloc'd arrays");
-        self.sweep_malloced_arrays();
+        // println!("sweeping malloc'd arrays");
+        // self.sweep_malloced_arrays();
 
         println!("sweeping bigvals");
         self.sweep_bigvals(full);
@@ -2102,14 +2141,14 @@ impl<'a> Gc2<'a> {
         println!("verifying tags");
         self.verify_tags();
 
-        println!("sweeping pools");
-        self.sweep_pools(full);
+        // println!("sweeping pools");
+        // self.sweep_pools(full);
 
-        println!("sweeping remsets");
-        for t in unsafe { get_all_tls() } {
-            let tl_gc = unsafe { &mut * (*t).tl_gcs };
-            tl_gc.sweep_remset(full);
-        }
+        // println!("sweeping remsets");
+        // for t in unsafe { get_all_tls() } {
+        //     let tl_gc = unsafe { &mut * (*t).tl_gcs };
+        //     tl_gc.sweep_remset(full);
+        // }
 
         println!("done sweeping")
     }

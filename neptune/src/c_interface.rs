@@ -472,6 +472,8 @@ pub const N_CALL_CACHE: usize = 4096; // from options.h
 
 pub const PROMOTE_AGE: usize = 1;
 
+pub const JL_CACHE_BYTE_ALIGNMENT: usize = 64;
+
 extern {
     pub fn arraylist_push(a: * mut JlArrayList, e: * mut c_void);
 
@@ -484,7 +486,7 @@ extern {
     pub fn jl_hrtime() -> u64;
 
     pub fn gc_settime_premark_end();
-    pub fn gc_time_mark_pause(t0: u64, scanned_bytes: usize, perm_scanned_bytes: usize); 
+    pub fn gc_time_mark_pause(t0: u64, scanned_bytes: usize, perm_scanned_bytes: usize);
     pub fn gc_settime_postmark_end();
 
     pub fn gc_time_mallocd_array_start();
@@ -495,6 +497,9 @@ extern {
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
 
     pub fn jl_gc_collect(full: c_int);
+
+    // to print types for debugging
+    pub fn jl_(v: * const JlValue);
 
     #[cfg(gc_debug_env)]
     pub fn gc_scrub_record_task(ta: * mut JlTask);
@@ -662,15 +667,8 @@ pub fn set_mark_reset_age(n: i32) {
 }
 
 #[inline(always)]
-#[cfg(timing)]
 pub fn neptune_hrtime() -> u64 {
     unsafe { jl_hrtime() }
-}
-
-#[inline(always)]
-#[cfg(not(timing))]
-pub fn neptune_hrtime() -> u64 {
-  0
 }
 
 #[inline(always)]
@@ -715,6 +713,11 @@ pub fn get_gc_verifying() -> bool {
 #[inline(always)]
 pub fn get_gc_verifying() -> bool {
     false
+}
+
+#[inline(always)]
+pub fn llt_align(x: usize, sz: usize) -> usize {
+    ((x as isize + sz as isize - 1) & - (sz as isize)) as usize
 }
 
 pub fn jl_value_of(t: &JlTaggedValue) -> &JlValue {

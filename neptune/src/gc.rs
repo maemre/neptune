@@ -30,7 +30,7 @@ pub const PAGE_SZ: usize = 1 << PAGE_LG2; // 16k
 // GC stats. This is equivalent of jl_gc_num_t in Julia
 #[repr(C)]
 pub struct GcNum {
-    pub allocd:         i64,
+    pub allocd:         AtomicI64,
     pub deferred_alloc: i64,
     pub freed:          i64,
     pub malloc:         u64,
@@ -49,7 +49,7 @@ pub struct GcNum {
 impl GcNum {
     fn new() -> GcNum {
         GcNum {
-            allocd:         0,
+            allocd:         AtomicI64::new(0),
             deferred_alloc: 0,
             freed:          0,
             malloc:         0,
@@ -216,37 +216,43 @@ impl<'a> Finalizer<'a> {
 // representation of big objects
 #[repr(C)]
 pub struct BigVal {
-    //next: Box<BigVal>,
-    //prev: Box<BigVal>,
+    next: * mut c_void, // unused
+    prev: * mut c_void, // unused
     szOrAge: usize, // unpack this union via methods
-    padding: [u8; 32], // to align to 64 bits
-    headerOrBits: usize, // unpack this union via methods
+    padding: [u64; 8 - 4], // to align to 64 bits when included the taggedvalue below
+    // taggedvalue is here (this is header union in bigval_t)
     // object data is here
 }
 
 impl BigVal {
-    pub fn new(s: usize, h: usize) -> Self {
-        BigVal { szOrAge: s, padding: [0; 32], headerOrBits: h }
+    #[inline(always)]
+    pub fn true_size() -> usize {
+        mem::size_of::<BigVal>() + mem::size_of::<JlTaggedValue>()
     }
 
-    pub unsafe fn taggedvalue(&self) -> &JlTaggedValue {
+    pub fn allocd_size(&self) -> usize {
+        llt_align(self.size() + BigVal::true_size(), JL_CACHE_BYTE_ALIGNMENT)
+    }
+
+    pub fn taggedvalue(&self) -> &JlTaggedValue {
         let ptr: * const Self = self;
-        mem::transmute(ptr.offset(1))
+        unsafe { mem::transmute(ptr.offset(1)) }
     }
 
-    pub unsafe fn mut_taggedvalue(&mut self) -> &mut JlTaggedValue {
+    pub fn mut_taggedvalue(&mut self) -> &mut JlTaggedValue {
         let ptr: * mut Self = self;
-        mem::transmute(ptr.offset(1))
+        unsafe { mem::transmute(ptr.offset(1)) }
     }
 
     #[inline(always)]
     pub fn size(&self) -> usize {
-        self.szOrAge
+        self.szOrAge.get_bits(2..64) << 2
     }
 
     #[inline(always)]
     pub fn set_size(&mut self, size: usize) {
-        self.szOrAge = size;
+        debug_assert_eq!(size & 3, 0);
+        self.szOrAge.set_bits(2..64, size >> 2);
     }
 
     #[inline(always)]

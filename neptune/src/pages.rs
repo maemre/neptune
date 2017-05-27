@@ -68,7 +68,7 @@ impl PageMgr {
             };
             
             // check what size page it's using, before we do any possible exponential decrease
-            println!("page count: {}", region_pg_count);
+            println!("initial page count per region: {}", region_pg_count);
 
             unsafe {
                 // an exponential decrease to find limit within a binary order of magnitude quickly
@@ -79,6 +79,8 @@ impl PageMgr {
                     }
                 }
             }
+
+            println!("page count per region after consulting `rlimit`: {}", region_pg_count);
         }
         PageMgr {
             region_pg_count: region_pg_count,
@@ -156,7 +158,7 @@ impl PageMgr {
         let meta_sz =  pg_cnt;
 
         let mut region = Region::new();
-        println!("page count: {}", pg_cnt);
+        println!("allocated a new region with page count: {}", pg_cnt);
         // TODO: handle failure for this gracefully
         region.pages = unsafe {
             PageMgr::alloc_unmanaged_array(pg_cnt, Some(PAGE_SZ))
