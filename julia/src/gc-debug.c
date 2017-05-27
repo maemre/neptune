@@ -699,9 +699,9 @@ void jl_print_gc_stats(JL_STREAM *s)
                   jl_ns2ms(gc_num.total_time) / gc_num.pause,
                   jl_ns2ms(max_pause));
         jl_printf(s, "\t\t(%2d%% mark, %2d%% sweep, %2d%% finalizers)\n",
-                  (int)(total_mark_time * 100 / gc_num.total_time),
-                  (int)(total_sweep_time * 100 / gc_num.total_time),
-                  (int)(total_fin_time * 100 / gc_num.total_time));
+                  (int)(total_mark_time * 100 / (double)gc_num.total_time),
+                  (int)(total_sweep_time * 100 / (double)gc_num.total_time),
+                  (int)(total_fin_time * 100 / (double)gc_num.total_time));
     }
     int i = 0;
     while (i < REGION_COUNT && neptune_get_pages(neptune_get_region(i))) i++;
