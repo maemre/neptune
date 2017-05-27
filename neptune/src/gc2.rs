@@ -698,6 +698,9 @@ impl<'a> Gc2<'a> {
             })
     }
 
+    /// Allocate a big object with given size, including object tag (i.e. tagged type pointer).
+    ///
+    /// Note: Size includes the tag a nd the tag is not cleared!
     pub fn big_alloc(&mut self, size: usize) -> &mut JlValue {
         // TODO: maybe_collect
         let rawsz = mem::size_of::<BigVal>().checked_add(size)
@@ -711,7 +714,7 @@ impl<'a> Gc2<'a> {
 
         let (bv, tv) = unsafe {
             let ptr = self.rust_alloc::<BigVal>(allocsz);
-            (*ptr).set_size(size);
+            (*ptr).szOrAge = size;
             (*ptr).set_age(0);
             let taggedvalue: &mut JlTaggedValue = (*ptr).mut_taggedvalue();
             (&mut *ptr, taggedvalue)

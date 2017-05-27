@@ -218,7 +218,7 @@ impl<'a> Finalizer<'a> {
 pub struct BigVal {
     next: * mut c_void, // unused
     prev: * mut c_void, // unused
-    szOrAge: usize, // unpack this union via methods
+    pub szOrAge: usize, // unpack this union via methods
     padding: [u64; 8 - 4], // to align to 64 bits when included the taggedvalue below
     // taggedvalue is here (this is header union in bigval_t)
     // object data is here
