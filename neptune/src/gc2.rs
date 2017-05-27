@@ -12,6 +12,7 @@ use std::slice;
 use std::ffi::CStr;
 use std::ops::Range;
 use util::*;
+use std::collections::HashSet;
 
 const PURGE_FREED_MEMORY: bool = false;
 
@@ -57,6 +58,8 @@ static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
     //    64,   32,  160,   64,   16,   64,  112,  128, bytes lost
 ];
 const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(), size_of isn't a const fn yet :(
+
+pub static mut freed: Option<HashSet<usize>> = None;
 
 static GC_ALREADY_RUN: AtomicBool = AtomicBool::new(false);
 
@@ -537,8 +540,6 @@ pub struct Gc2<'a> {
     // parent pointer to thread-local storage for other fields
     // we can access stack base etc. from here
     tls: &'static mut JlTLS,
-    // amount of allocation till next collection
-    allocd: isize,
     // mark stack for marking on this thread
     mark_stack: Vec<* mut JlValue>,
 }
@@ -553,7 +554,6 @@ impl<'a> Gc2<'a> {
            in_finalizer: false,
            disable_gc: false,
            tls: tls,
-           allocd: - DEFAULT_COLLECT_INTERVAL,
            mark_stack: Vec::new(),
         }
     }
@@ -596,10 +596,13 @@ impl<'a> Gc2<'a> {
             return self.big_alloc(size);
         }
 
-        self.allocd += size as isize;
-        if unsafe { intrinsics::unlikely(self.allocd > 0) || debug_check_pool() } {
-            if cfg!(feature="run_only_once") && ! GC_ALREADY_RUN.load(Ordering::SeqCst) {
-                println!("triggering periodic collection");
+        unsafe {
+            // Julia's GC also doesn't use atomic increments for this. TODO: maybe switch to atomic increments
+            *gc_num.allocd.get_mut() += size as i64;
+        }
+        if unsafe { intrinsics::unlikely(unsafe { *gc_num.allocd.get_mut() } > 0) || debug_check_pool() } {
+            if ! (cfg!(feature="run_only_once") && GC_ALREADY_RUN.load(Ordering::SeqCst)) {
+                // println!("triggering periodic collection");
                 unsafe {
                     jl_gc_collect(0);
                 }
@@ -714,6 +717,9 @@ impl<'a> Gc2<'a> {
 
         let (bv, tv) = unsafe {
             let ptr = self.rust_alloc::<BigVal>(allocsz);
+            (*ptr).tid = self.tls.tid;
+            (*ptr).in_list = true;
+            (*ptr).slot = self.heap.big_objects.len();
             (*ptr).szOrAge = size;
             (*ptr).set_age(0);
             let taggedvalue: &mut JlTaggedValue = (*ptr).mut_taggedvalue();
@@ -766,7 +772,6 @@ impl<'a> Gc2<'a> {
             }
         }
 
-        println!("commence collection");
         debug_assert!(self.mark_stack.is_empty());
 
         // 1. fix GC bits of objects in the memset (a.k.a. premark)
@@ -914,7 +919,7 @@ impl<'a> Gc2<'a> {
             scanned_bytes = 0;
         }
 
-        println!("collection decisions: sweep_full = {}, recollect = {}", sweep_full, recollect);
+        // println!("collection decisions: sweep_full = {}, recollect = {}", sweep_full, recollect);
 
         // sweep
         self.sweep(sweep_full);
@@ -923,6 +928,33 @@ impl<'a> Gc2<'a> {
         self.writeback_stats(t0, sweep_full, recollect, actual_allocd, estimate_freed);
 
         recollect
+    }
+
+    fn unlink_big_object(b: &mut BigVal) {
+        if ! b.in_list {
+            return;
+        }
+        if b.tid < 0 {
+            // this part may cause deadlocks if this is called while holding lock of big_objects_marked
+            unsafe {
+                let mut bo: MutexGuard<Vec<* mut BigVal>> = big_objects_marked.as_mut().unwrap().lock().unwrap();
+                bo.swap_remove(b.slot as usize);
+                b.in_list = false;
+                b.slot = 0;
+            }
+        } else {
+            // This part may not be thread-safe. We may need a lock
+            // for this one. However, this should be fine since this
+            // method is only called when:
+            // 1. Either GC is not running, during jl_gc_realloc_string
+            // 2. Inside sync_cache_nolock, callers of which need to guarantee thread-safety anyways
+            let gc = unsafe {
+                &mut *get_all_tls()[b.tid as usize].tl_gcs
+            };
+            gc.heap.big_objects.swap_remove(b.slot as usize);
+            b.slot = 0;
+            b.in_list = false;
+        };
     }
 
     fn sync_cache_nolock(&mut self, cache: &mut GcMarkCache) {
@@ -934,10 +966,12 @@ impl<'a> Gc2<'a> {
                 &mut *((ptr as usize).clear_tag(1) as * mut BigVal)
             };
 
-            // In C: unlink hdr here using swap_remove, gc_big_object_unlink(hdr)
-            // we don't do it because we don't use next pointers.
+            Gc2::unlink_big_object(hdr);
 
             if ((ptr as usize) & 1) != 0 {
+                hdr.slot = self.heap.big_objects.len();
+                hdr.tid = self.tls.tid;
+                hdr.in_list = true;
                 self.heap.big_objects.push(hdr);
             } else {
                 // move from `big_objects` to `big_objects_marked`
@@ -945,19 +979,22 @@ impl<'a> Gc2<'a> {
                     // TODO: fix my attempt at making thread-safe
                     let mut bo: MutexGuard<Vec<* mut BigVal>> = big_objects_marked.as_mut().unwrap().lock().unwrap();
                     (*bo).push(hdr);
+                    hdr.in_list = true;
+                    hdr.slot = (*bo).len();
+                    hdr.tid = -1;
                 }
             }
-
-            cache.nbig_obj = 0;
-
-            unsafe {
-                perm_scanned_bytes += cache.perm_scanned_bytes;
-                scanned_bytes += cache.scanned_bytes;
-            }
-
-            cache.perm_scanned_bytes = 0;
-            cache.scanned_bytes = 0;
         }
+
+        cache.nbig_obj = 0;
+
+        unsafe {
+            perm_scanned_bytes += cache.perm_scanned_bytes;
+            scanned_bytes += cache.scanned_bytes;
+        }
+
+        cache.perm_scanned_bytes = 0;
+        cache.scanned_bytes = 0;
     }
 
     fn mark_object_list(&mut self, list: * mut JlArrayList, start: usize) {
@@ -1006,7 +1043,7 @@ impl<'a> Gc2<'a> {
         Gc2::time_sweep_pause(gc_end_t, actual_allocd, estimate_freed, full);
         unsafe {
             gc_num.full_sweep += full as libc::c_int;
-            prev_sweep_full += full as libc::c_int;
+            prev_sweep_full = full as libc::c_int;
             *gc_num.allocd.get_mut() = - (gc_num.interval as i64);
             live_bytes += gc_num.since_sweep as i64 - gc_num.freed;
             gc_num.pause += (! recollect) as libc::c_int;
@@ -1387,7 +1424,8 @@ impl<'a> Gc2<'a> {
         self.setmark_pool_(o, mark_mode, meta);
     }
 
-    // update metadata of the *marked* big object
+    /// Update metadata of the *marked* big object. This method should
+    /// be called *only once* per object.
     fn setmark_big(&mut self, o: * mut JlTaggedValue, mark_mode: u8) {
         debug_assert!(unsafe { self.pg_mgr.find_pagemeta(o).is_none() }, "Tried to process marked pool-allocated object as marked big object");
 
@@ -1395,7 +1433,7 @@ impl<'a> Gc2<'a> {
             BigVal::from_mut_jltaggedvalue(&mut *o)
         };
 
-        let nbytes = hdr.size() & !3;
+        let nbytes = hdr.size(); // the size() method does untagging already
 
         if mark_mode == GC_OLD_MARKED {
             // object is old
@@ -1637,11 +1675,19 @@ impl<'a> Gc2<'a> {
             nobj = 0;
         }
 
+        if hdr.in_list == true {
+            return;
+        }
+
         let v = if toyoung {
             ((hdr as * mut BigVal as usize) | 1) as * mut BigVal
         } else {
-            hdr
+            hdr as * mut BigVal
         };
+
+        unsafe {
+            hdr.slot = nobj;
+        }
 
         self.cache.big_obj[nobj] = v;
         self.cache.nbig_obj = nobj + 1;
@@ -1886,13 +1932,19 @@ impl<'a> Gc2<'a> {
     }
 
     // sweep bigvals in all threads
-    fn sweep_bigvals(&mut self, full: bool) {
+    fn sweep_bigvals(&mut self, full: bool) -> HashSet<usize> {
+        let mut fo = HashSet::new();
+
         for ptls in unsafe { get_all_tls() } {
             // get thread-local Gc
             let tl_gc = unsafe {
                 &mut * (*ptls).tl_gcs
             };
-            tl_gc.sweep_local_bigvals(full);
+            for jf in tl_gc.sweep_local_bigvals(full) {
+                if ! fo.insert(jf) {
+                    panic!("Double freed 0x{:x} while sweeping thread-local bigval list!", jf as usize);
+                }
+            }
         }
 
         if full {
@@ -1904,22 +1956,31 @@ impl<'a> Gc2<'a> {
                 // make pointers managed, this trick is required to match type of self.heap.big_objects
                 mem::transmute::<&mut Vec<* mut BigVal>, &mut Vec<& mut BigVal>>(&mut *bo)
             };
-            Gc2::sweep_big_list(&mut *big_objects, full);
+
+            for jf in Gc2::sweep_big_list(&mut *big_objects, full) {
+                if ! fo.insert(jf) {
+                    panic!("Double freed 0x{:x} while sweeping thread-local bigval list!", jf as usize);
+                }
+            }
             // move all survivors from big_objects_marked to this thread's big_objects
             self.heap.big_objects.append(&mut *big_objects);
         }
+
+        fo
     }
 
     // sweep bigvals local to this thread
-    fn sweep_local_bigvals(&mut self, full: bool) {
-        Gc2::sweep_big_list(&mut self.heap.big_objects, full);
+    fn sweep_local_bigvals(&mut self, full: bool) -> HashSet<usize> {
+        Gc2::sweep_big_list(&mut self.heap.big_objects, full)
     }
 
-    fn sweep_big_list(list: &mut Vec<& mut BigVal>, full: bool) {
+    fn sweep_big_list(list: &mut Vec<& mut BigVal>, full: bool) -> HashSet<usize> {
         // TODO: report statistics
 
         let mut nbig_obj = list.len();
         let mut i = 0;
+        let mut fo = HashSet::new();
+
         while i < nbig_obj {
             // lots of repetition to make borrow checker happy
             if unsafe { list[i].taggedvalue().marked() } {
@@ -1939,13 +2000,19 @@ impl<'a> Gc2<'a> {
                 nbig_obj -= 1;
 
                 let begin = b.taggedvalue().get_value() as * const JlValue as usize;
-                println!("reclaimed 0x{:x} to 0x{:x}", begin, begin + b.size() + BigVal::true_size());
+                // println!("reclaimed 0x{:x} to 0x{:x}", begin, begin + b.size() + BigVal::true_size());
+
+                if ! fo.insert(b as * mut BigVal as usize) {
+                    panic!("Double freed 0x{:x}!", b as * mut BigVal as usize);
+                }
 
                 unsafe {
                     Gc2::rust_free(b as * mut BigVal, b.allocd_size());
                 }
             }
         }
+
+        fo
     }
 
     fn sweep_weakrefs(&mut self) {
@@ -2133,6 +2200,36 @@ impl<'a> Gc2<'a> {
         }
     }
 
+    fn print_big_object_lists() {
+        println!("--------------------");
+        for t in unsafe { get_all_tls() } {
+            let gc = unsafe { &mut * t.tl_gcs };
+
+            print!("big objects in t{}'s list:", t.tid);
+
+            for b in gc.heap.big_objects.iter() {
+                print!(" 0x{:x}", *b as * const BigVal as usize);
+            }
+            println!();
+
+            print!("big objects in t{}'s cache:", t.tid);
+
+            for i in 0..gc.cache.nbig_obj {
+                print!(" 0x{:x}", gc.cache.big_obj[i] as usize);
+            }
+            println!();
+        }
+
+        print!("big_objects_marked: ");
+
+        let bo = unsafe { big_objects_marked.as_mut().unwrap().lock().unwrap() };
+        for b in (*bo).iter() {
+            print!(" 0x{:x}", *b as usize);
+        }
+        println!();
+        println!("--------------------");
+    }
+
     fn sweep(&mut self, full: bool) {
         self.verify_module(unsafe { &mut *jl_core_module }); self.verify_module(unsafe { &mut *jl_main_module });
 
@@ -2146,7 +2243,17 @@ impl<'a> Gc2<'a> {
         self.sweep_malloced_arrays();
 
         // println!("sweeping bigvals");
-        self.sweep_bigvals(full);
+        let freed_vals = unsafe {
+            freed.as_mut().unwrap()
+        };
+
+        for jf in self.sweep_bigvals(full) { // jf = just_freed
+            if ! freed_vals.insert(jf) {
+                println!("Freed already freed address: 0x{:x}", jf as usize);
+            }
+        }
+
+        // Gc2::print_big_object_lists();
 
         // println!("scrubbing");
         self.scrub();

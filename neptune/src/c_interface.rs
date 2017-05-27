@@ -22,6 +22,7 @@ use std::sync::atomic::*;
 use std::ffi::CString;
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -935,6 +936,12 @@ pub unsafe extern fn neptune_init_page_mgr() {
     unsafe {
         big_objects_marked = Some(Box::new(Mutex::new(Vec::new())));
     }
+
+    unsafe { // fsck thread safety for now
+        freed = Some(HashSet::new());
+    }
+
+    assert_eq!(mem::size_of::<BigVal>(), 56, "BigVal+TaggedValue should align to 64 bytes!");
     // end of gc_init
 
     println!("page offset: {}", GC_PAGE_OFFSET);
