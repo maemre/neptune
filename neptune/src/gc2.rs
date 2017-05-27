@@ -1725,6 +1725,7 @@ impl<'a> Gc2<'a> {
             let v0 = items[i].clone();
             let is_cptr = (v0 as usize).marked();
             let v = (v0 as usize).clear_tag(1) as * mut libc::c_void;
+            let mut dontIncrement = false;
 
             if unsafe { intrinsics::unlikely(v0.is_null()) } {
                 // remove from this list
@@ -1750,7 +1751,11 @@ impl<'a> Gc2<'a> {
                 if i < len - 2 {
                     items[i] = items[len - 2];
                     items[i + 1] = items[len - 1];
-                    i -= 2;
+                    // we do this instead of decrementing 2 because
+                    // Rust checks for underflow and although
+                    // temporary underflow is ok in this case, there
+                    // is no easy way to tell that to Rust.
+                    dontIncrement = true; // instead of just having i -= 2 here
                 }
                 len -= 2;
             }
@@ -1778,7 +1783,9 @@ impl<'a> Gc2<'a> {
                 }
             }
 
-            i += 2;
+            if unsafe { intrinsics::likely(! dontIncrement) } {
+                i += 2;
+            }
         }
     }
 
@@ -1827,16 +1834,7 @@ impl<'a> Gc2<'a> {
                             let o = unsafe {
                                 mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
                             };
-                            if o.marked() {
-                                // clear marks during sweep
-                                o.set_marked(false);
-
-                                if full || ! o.old() {
-                                    // it is a young object survived till next full sweep, promote it
-                                    o.set_old(true);
-                                }
-                                // TODO: better promotion, similar to original one in Julia
-                            } else {
+                            if ! o.marked() {
                                 nfree += 1;
                             }
                         }
@@ -1850,7 +1848,19 @@ impl<'a> Gc2<'a> {
                                 let o = unsafe {
                                     mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
                                 };
-                                freelist.push(o);
+
+                                if o.marked() {
+                                    // clear marks during sweep
+                                    o.set_marked(false);
+
+                                    if full || ! o.old() {
+                                        // it is a young object survived till next full sweep, promote it
+                                        o.set_old(true);
+                                    }
+                                    // TODO: better promotion, similar to original one in Julia
+                                } else {
+                                    freelist.push(o);
+                                }
                             }
                         } else {
                             // page doesn't have anything alive in it, mark it for freeing
