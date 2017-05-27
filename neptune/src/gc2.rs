@@ -1177,7 +1177,7 @@ impl<'a> Gc2<'a> {
             let npointers = layout.npointers();
             nptr += ((npointers & 0xff) as usize) << (npointers & 0x300);
 
-            for i in 1..nf {
+            for i in 0..nf {
                 if unsafe { np_jl_field_isptr(vt, i as i32) != 0 } {
                     let slot = unsafe {
                         &*((*v as * mut u8).offset(np_jl_field_offset(vt, i as i32) as isize) as * mut * mut JlValue)
