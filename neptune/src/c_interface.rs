@@ -937,10 +937,6 @@ pub unsafe extern fn neptune_init_page_mgr() {
         big_objects_marked = Some(Box::new(Mutex::new(Vec::new())));
     }
 
-    unsafe { // fsck thread safety for now
-        freed = Some(HashSet::new());
-    }
-
     assert_eq!(mem::size_of::<BigVal>(), 56, "BigVal+TaggedValue should align to 64 bytes!");
     // end of gc_init
 

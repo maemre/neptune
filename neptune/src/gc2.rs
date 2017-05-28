@@ -59,8 +59,6 @@ static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
 ];
 const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(), size_of isn't a const fn yet :(
 
-pub static mut freed: Option<HashSet<usize>> = None;
-
 static GC_ALREADY_RUN: AtomicBool = AtomicBool::new(false);
 
 /*
@@ -1959,19 +1957,14 @@ impl<'a> Gc2<'a> {
     }
 
     // sweep bigvals in all threads
-    fn sweep_bigvals(&mut self, full: bool) -> HashSet<usize> {
-        let mut fo = HashSet::new();
+    fn sweep_bigvals(&mut self, full: bool) {
 
         for ptls in unsafe { get_all_tls() } {
             // get thread-local Gc
             let tl_gc = unsafe {
                 &mut * (*ptls).tl_gcs
             };
-            for jf in tl_gc.sweep_local_bigvals(full) {
-                if ! fo.insert(jf) {
-                    panic!("Double freed 0x{:x} while sweeping thread-local bigval list!", jf as usize);
-                }
-            }
+            tl_gc.sweep_local_bigvals(full);
         }
 
         if full {
@@ -1984,29 +1977,23 @@ impl<'a> Gc2<'a> {
                 mem::transmute::<&mut Vec<* mut BigVal>, &mut Vec<& mut BigVal>>(&mut *bo)
             };
 
-            for jf in Gc2::sweep_big_list(&mut *big_objects, full) {
-                if ! fo.insert(jf) {
-                    panic!("Double freed 0x{:x} while sweeping thread-local bigval list!", jf as usize);
-                }
-            }
+            Gc2::sweep_big_list(&mut *big_objects, full);
+
             // move all survivors from big_objects_marked to this thread's big_objects
             self.heap.big_objects.append(&mut *big_objects);
         }
-
-        fo
     }
 
     // sweep bigvals local to this thread
-    fn sweep_local_bigvals(&mut self, full: bool) -> HashSet<usize> {
+    fn sweep_local_bigvals(&mut self, full: bool) {
         Gc2::sweep_big_list(&mut self.heap.big_objects, full)
     }
 
-    fn sweep_big_list(list: &mut Vec<& mut BigVal>, full: bool) -> HashSet<usize> {
+    fn sweep_big_list(list: &mut Vec<& mut BigVal>, full: bool) {
         // TODO: report statistics
 
         let mut nbig_obj = list.len();
         let mut i = 0;
-        let mut fo = HashSet::new();
 
         while i < nbig_obj {
             // lots of repetition to make borrow checker happy
@@ -2029,17 +2016,11 @@ impl<'a> Gc2<'a> {
                 let begin = b.taggedvalue().get_value() as * const JlValue as usize;
                 // println!("reclaimed 0x{:x} to 0x{:x}", begin, begin + b.size() + BigVal::true_size());
 
-                if ! fo.insert(b as * mut BigVal as usize) {
-                    panic!("Double freed 0x{:x}!", b as * mut BigVal as usize);
-                }
-
                 unsafe {
                     Gc2::rust_free(b as * mut BigVal, b.allocd_size());
                 }
             }
         }
-
-        fo
     }
 
     fn sweep_weakrefs(&mut self) {
@@ -2270,17 +2251,7 @@ impl<'a> Gc2<'a> {
         self.sweep_malloced_arrays();
 
         // println!("sweeping bigvals");
-        let freed_vals = unsafe {
-            freed.as_mut().unwrap()
-        };
-
-        for jf in self.sweep_bigvals(full) { // jf = just_freed
-            if ! freed_vals.insert(jf) {
-                println!("Freed already freed address: 0x{:x}", jf as usize);
-            }
-        }
-
-        // Gc2::print_big_object_lists();
+        self.sweep_bigvals(full);
 
         // println!("scrubbing");
         self.scrub();
