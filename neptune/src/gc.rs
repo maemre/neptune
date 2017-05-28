@@ -121,8 +121,6 @@ pub struct Gc<'a> {
     // list of marked big objects, not per thread
     pub big_objects_marked: Vec<BigVal>,
     // list of marked finalizers for object that need to be finalized in last mark phase
-    pub finalizer_list_marked: Vec<Finalizer<'a>>,
-    pub to_finalize: Vec<Finalizer<'a>>, // make sure that this doesn't have tagged pointers by refining the type
     pub lazy_freed_pages: i64,
     pub page_mgr: PageMgr,
     pub page_size: usize,
@@ -144,59 +142,10 @@ impl<'a> Gc<'a> {
             last_long_collect_interval: 0,
             regions: regions,
             big_objects_marked: Vec::new(),
-            finalizer_list_marked: Vec::new(),
-            to_finalize: Vec::new(),
             lazy_freed_pages: 0,
             page_mgr: PageMgr::new(),
             page_size: page_size, // equivalent of jl_page_size, size of OS' pages
         }
-    }
-
-    pub fn schedule_finalization(&mut self, o: Option<&'a JlValue>, f: uintptr_t) {
-        self.to_finalize.push(Finalizer::new(o, f));
-    }
-
-    // move run_finalizer to C side
-    // pub fn run_finalizer(tls: Option<JlTLS>, obj: &JlValue, ff: &Option<JlValue>)
-
-    // if `need_sync` then `list` is the `finalizers` list of another thread
-    pub fn finalize_object<'b>(&mut self, list: &mut Vec<Finalizer<'b>>, o: Option<&'b JlValue>, copied_list: &mut Vec<Finalizer<'b>>, need_sync: bool) {
-        // make sure that this is atomic by checking need_sync
-        for i in 1..list.len() {
-            let v = list[i].obj;
-            let mut should_move = false;
-            if o.map(|n| n as *const JlValue as usize) == (v.as_ref().map(|n| (n as *const &JlValue as usize).clear_tag(1))) {
-                should_move = true;
-                let f = list[i].fun;
-                // function is an actual function, cast the pointer
-                if v.as_ref().map(|n| (n as *const &JlValue as usize) & 1).unwrap_or(0) != 0 {
-                    // this works because of null pointer optimization on Option<T>
-                    let f: fn(Option<&JlValue>) -> *const c_void = unsafe { mem::transmute(f) };
-                    f(o);
-                } else {
-                    copied_list.push(Finalizer::new(o, f));
-                }
-            }
-            if should_move || v.is_none() {
-                // TODO: make sure that these updates are atomic by enforcing rules on vecs if need_sync
-                list.swap_remove(i);
-            }
-        }
-    }
-
-    // ???
-}
-
-type JlValue = c_void;
-
-pub struct Finalizer<'a> {
-    obj: Option<&'a JlValue>,
-    fun: uintptr_t,
-}
-
-impl<'a> Finalizer<'a> {
-    pub fn new(o: Option<&'a JlValue>, fun: uintptr_t) -> Self {
-        Finalizer { obj: o, fun: fun }
     }
 }
 
