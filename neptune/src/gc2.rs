@@ -469,9 +469,9 @@ pub struct ThreadHeap<'a> {
     pub big_objects: Vec<&'a mut BigVal>,
     // remset
     rem_bindings: Vec<&'a mut JlBinding<'a>>,
-    remset: Vec<* mut JlValue>,
-    last_remset: Vec<* mut JlValue>,
-    remset_nptr: usize,
+    pub remset: Vec<* mut JlValue>,
+    pub last_remset: Vec<* mut JlValue>,
+    pub remset_nptr: usize,
 }
 
 impl<'a> ThreadHeap<'a> {
@@ -1054,7 +1054,7 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    #[cfg(gc_time)]
+    #[cfg(feature = "gc_time")]
     #[inline(always)]
     fn time_sweep_pause(gc_end_t: u64, actual_allocd: i64, estimate_freed: i64, sweep_full: bool) {
         unsafe {
@@ -1062,7 +1062,7 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    #[cfg(not(gc_time))]
+    #[cfg(not(feature = "gc_time"))]
     #[inline(always)]
     fn time_sweep_pause(gc_end_t: u64, actual_allocd: i64, estimate_freed: i64, sweep_full: bool) {
     }

@@ -815,8 +815,8 @@ void gc_time_mark_pause(int64_t t0, int64_t scanned_bytes,
     int64_t remset_nptr = 0;
     for (int t_i = 0;t_i < jl_n_threads;t_i++) {
         jl_ptls_t ptls2 = jl_all_tls_states[t_i];
-        last_remset_len += ptls2->heap.last_remset->len;
-        remset_nptr = ptls2->heap.remset_nptr;
+        last_remset_len += neptune_last_remset_len(ptls2);
+        remset_nptr = neptune_remset_nptr(ptls2);
     }
     jl_printf(JL_STDOUT, "GC mark pause %.2f ms | "
               "scanned %" PRId64 " kB = %" PRId64 " + %" PRId64 " | "

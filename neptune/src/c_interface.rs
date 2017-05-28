@@ -579,69 +579,56 @@ extern {
 }
 
 #[inline(always)]
-#[cfg(gc_time)]
 pub fn neptune_gc_settime_premark_end() {
-    println!("premark end!");
     unsafe { gc_settime_premark_end() }
 }
 
 #[inline(always)]
-#[cfg(not(gc_time))]
-pub fn neptune_gc_settime_premark_end() {
-}
-
-#[inline(always)]
-#[cfg(gc_time)]
+#[cfg(feature = "gc_time")]
 pub fn neptune_gc_time_mark_pause(t0: u64, sb: usize, psb: usize) {
     unsafe { gc_time_mark_pause(t0, sb, psb) }
 }
 
 #[inline(always)]
-#[cfg(not(gc_time))]
+#[cfg(not(feature = "gc_time"))]
 pub fn neptune_gc_time_mark_pause(t0: u64, sb: usize, psb: usize) {
 }
 
 #[inline(always)]
-#[cfg(gc_time)]
 pub fn neptune_gc_settime_postmark_end() {
     unsafe { gc_settime_postmark_end() }
 }
 
 #[inline(always)]
-#[cfg(not(gc_time))]
-pub fn neptune_gc_settime_postmark_end() {
-}
-
-#[inline(always)]
-#[cfg(gc_time)]
+#[cfg(feature = "gc_time")]
 pub fn neptune_gc_time_mallocd_array_start() {
     unsafe { gc_time_mallocd_array_start() }
 }
 
 #[inline(always)]
-#[cfg(not(gc_time))]
+#[cfg(not(feature = "gc_time"))]
 pub fn neptune_gc_time_mallocd_array_start() {
 }
 
 #[inline(always)]
-#[cfg(gc_time)]
+#[cfg(feature = "gc_time")]
 pub fn neptune_gc_time_mallocd_array_end() {
     unsafe { gc_time_mallocd_array_end() }
 }
 
 #[inline(always)]
-#[cfg(not(gc_time))]
+#[cfg(not(feature = "gc_time"))]
 pub fn neptune_gc_time_mallocd_array_end() {
 }
 
 #[inline(always)]
-#[cfg(gc_time)]
+#[cfg(feature = "gc_time")]
 pub fn neptune_gc_time_count_mallocd_array(bits: u8) {
     unsafe { gc_time_count_mallocd_array(bits) }
 }
 
 #[inline(always)]
-#[cfg(not(gc_time))]
+#[cfg(not(feature = "gc_time"))]
 pub fn neptune_gc_time_count_mallocd_array(bits: u8) {
 }
 
@@ -1119,4 +1106,20 @@ pub extern fn neptune_push_weakref(gc: &mut Gc2, wr: &mut WeakRef) {
 #[no_mangle]
 pub unsafe extern fn neptune_push_big_object<'a>(gc: &mut Gc2<'a>, b: &'a mut BigVal) {
     gc.heap.big_objects.push(b);
+}
+
+//----------------------------------------------------------------------------------
+// Access to stats for gc_time
+#[no_mangle]
+pub unsafe extern fn neptune_remset_len_(gc: &mut Gc2, last_remset: u8) -> usize {
+    if last_remset != 0 {
+        gc.heap.last_remset.len()
+    } else {
+        gc.heap.remset.len()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern fn neptune_remset_nptr(gc: &mut Gc2) -> usize {
+    gc.heap.remset_nptr
 }

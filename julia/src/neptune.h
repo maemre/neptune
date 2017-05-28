@@ -25,4 +25,11 @@ void neptune_visit_mark_stack(tl_gcs_t *gc);
 void neptune_mark_roots(tl_gcs_t *gc);
 void neptune_mark_thread_local(tl_gcs_t *gc, tl_gcs_t *gc2);
 
+// get stats about the heap
+size_t neptune_remset_len_(tl_gcs_t *gc, uint8_t last_remset);
+size_t neptune_remset_nptr(tl_gcs_t *gc);
+
+#define neptune_remset_len(ptls) neptune_remset_len_(ptls->tl_gcs, 0)
+#define neptune_last_remset_len(ptls) neptune_remset_len_(ptls->tl_gcs, 1)
+
 #endif // NEPTUNE_H
