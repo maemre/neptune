@@ -20,7 +20,7 @@ use core;
 #[cfg(archbits="32")]
 pub const DEFAULT_REGION_PG_COUNT: usize = 8 * 4096; // 512 MB
 #[cfg(not(archbits="32"))] // 64-bit
-pub const DEFAULT_REGION_PG_COUNT: usize = 4 * 8 * 4096; // 2 GB, easier to debug
+pub const DEFAULT_REGION_PG_COUNT: usize = 16 * 8 * 4096; // 8 GB
 
 
 const MIN_REGION_PG_COUNT: usize = 64; // 1 MB
