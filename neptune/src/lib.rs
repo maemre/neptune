@@ -12,7 +12,8 @@
 #![feature(offset_to)]
 // to support const fns in globals and to enable const fn optimizations:
 #![feature(const_fn)]
-
+// to iterate over ranges with steps different than 1
+#![feature(step_by)]
 extern crate libc;
 extern crate bit_field;
 extern crate core;

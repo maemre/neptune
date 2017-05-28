@@ -810,12 +810,12 @@ impl<'a> Gc2<'a> {
 
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
-            self.sweep_finalizer_list(&mut t.finalizers); // these are confusingly called `sweep_finalizer_list`
+            Gc2::sweep_finalizer_list(&mut t.finalizers); // these are confusingly called `sweep_finalizer_list`
         }
 
         if unsafe { prev_sweep_full } != 0 {
             unsafe {
-                self.sweep_finalizer_list(&mut finalizer_list_marked);
+                Gc2::sweep_finalizer_list(&mut finalizer_list_marked);
             }
             orig_marked_len = 0;
         }
@@ -845,6 +845,8 @@ impl<'a> Gc2<'a> {
 
         set_mark_reset_age(0);
         neptune_gc_settime_postmark_end();
+
+        Gc2::verify_to_finalize();
 
         // flush everything in mark caches
         for t in unsafe { get_all_tls() } {
@@ -1002,7 +1004,7 @@ impl<'a> Gc2<'a> {
         let l = unsafe { &mut *list };
         let len = l.len;
         let items = l.as_slice_mut();
-        let mut i = 0;
+        let mut i = start;
 
         while i < len {
             let mut v = items[i];
@@ -1762,76 +1764,100 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    fn sweep_finalizer_list(&mut self, finalizers: &mut JlArrayList) {
+    fn sweep_finalizer_list(finalizers: &mut JlArrayList) {
         let listptr = finalizers as * mut JlArrayList;
-        let items = finalizers.as_slice_mut();
-        let mut len = items.len();
+        let mut len = finalizers.len;
         let mut i = 0;
+        // new scope to make borrow checker happy
+        {
+            let mut items = finalizers.as_slice_mut();
+            while i < len {
+                let v0 = items[i].clone();
+                let is_cptr = (v0 as usize).marked(); // c-pointers' value pointers (not taggedvalue pointers) are marked
+                let v = (v0 as usize).clear_tag(1) as * mut libc::c_void;
+                let mut dontIncrement = false;
 
-        while i < len {
-            let v0 = items[i].clone();
-            let is_cptr = (v0 as usize).marked();
-            let v = (v0 as usize).clear_tag(1) as * mut libc::c_void;
-            let mut dontIncrement = false;
-
-            if unsafe { intrinsics::unlikely(v0.is_null()) } {
-                // remove from this list
-                if i < len - 2 {
-                    items[i] = items[len - 2];
-                    items[i + 1] = items[len - 1];
-                    i -= 2;
-                }
-                len -= 2;
-                continue;
-            }
-
-            let fin = items[i+1].clone();
-            let isfreed = unsafe { &* as_jltaggedvalue(v) }.marked();
-            let isold = unsafe {
-                listptr != (&mut finalizer_list_marked) as * mut JlArrayList &&
-                    unsafe { &* as_jltaggedvalue(v) }.tag() == GC_OLD_MARKED &&
-                    (is_cptr || unsafe { &* as_jltaggedvalue(fin) }.tag() == GC_OLD_MARKED)
-            };
-
-            if isfreed || isold {
-                // remove from this list
-                if i < len - 2 {
-                    items[i] = items[len - 2];
-                    items[i + 1] = items[len - 1];
-                    // we do this instead of decrementing 2 because
-                    // Rust checks for underflow and although
-                    // temporary underflow is ok in this case, there
-                    // is no easy way to tell that to Rust.
-                    dontIncrement = true; // instead of just having i -= 2 here
-                }
-                len -= 2;
-            }
-
-            if isfreed {
-                if is_cptr {
-                    // schedule finalizer to execute right away if it is native (non-Julia) code
-                    unsafe {
-                        np_call_finalizer(fin, v);
+                if unsafe { intrinsics::unlikely(v0.is_null()) } {
+                    // remove from this list
+                    if i < len - 2 {
+                        items[i] = items[len - 2];
+                        items[i + 1] = items[len - 1];
+                    } else {
+                        i += 2;
                     }
+                    len -= 2;
                     continue;
                 }
 
-                unsafe {
-                    to_finalize.push(v);
-                    to_finalize.push(fin);
+                let fin = items[i+1].clone();
+                let isfreed = ! unsafe { &* as_jltaggedvalue(v) }.marked();
+                let isold = unsafe {
+                    listptr != (&mut finalizer_list_marked) as * mut JlArrayList &&
+                        unsafe { &* as_jltaggedvalue(v) }.tag() == GC_OLD_MARKED &&
+                        (is_cptr || unsafe { &* as_jltaggedvalue(fin) }.tag() == GC_OLD_MARKED)
+                };
+
+                if isfreed || isold {
+                    // remove from this list
+                    if i < len - 2 {
+                        items[i] = items[len - 2];
+                        items[i + 1] = items[len - 1];
+                        // we do this instead of decrementing 2 because
+                        // Rust checks for underflow and although
+                        // temporary underflow is ok in this case, there
+                        // is no easy way to tell that to Rust.
+                        dontIncrement = true; // instead of just having i -= 2 here
+                    }
+                    len -= 2;
+                }
+
+                if isfreed {
+                    if is_cptr {
+                        // schedule finalizer to execute right away if it is native (non-Julia) code
+                        unsafe {
+                            np_call_finalizer(fin, v);
+                        }
+                        if unsafe { intrinsics::likely(! dontIncrement) } {
+                            i += 2;
+                        }
+                        continue;
+                    }
+
+                    // this is schedule_finalization()
+                    unsafe {
+                        to_finalize.push(v);
+                        to_finalize.push(fin);
+                    }
+                }
+
+                if isold {
+                    // the caller relies on the new objects to be pushed to the end of the list
+                    unsafe {
+                        finalizer_list_marked.push(v0);
+                        finalizer_list_marked.push(fin);
+                    }
+                }
+
+                if unsafe { intrinsics::likely(! dontIncrement) } {
+                    i += 2;
                 }
             }
+        }
 
-            if isold {
-                // the caller relies on the new objects to be pushed to the end of the list
-                unsafe {
-                    finalizer_list_marked.push(v0);
-                    finalizer_list_marked.push(fin);
+        finalizers.len = len; // truncate the finalizer list
+    }
+
+    /// Verify that to_finalize doesn't contain any tagged pointers
+    fn verify_to_finalize() {
+        if cfg!(debug_assertions) {
+            let items = unsafe {
+                to_finalize.as_slice()
+            };
+
+            for i in (0..items.len()).step_by(2) {
+                if items[i].clone() as usize & 1 != 0 {
+                    panic!(format!("to_finalize has tagged pointer at index {}!", i));
                 }
-            }
-
-            if unsafe { intrinsics::likely(! dontIncrement) } {
-                i += 2;
             }
         }
     }
