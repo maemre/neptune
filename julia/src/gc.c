@@ -597,17 +597,6 @@ static void jl_gc_mark_ptrfree(jl_ptls_t ptls)
 }
 
 // Only one thread should be running in this function
-static int _jl_gc_collect(jl_ptls_t ptls, int full)
-{
-  return neptune_gc_collect(ptls->tl_gcs, full);
-}
-
-#ifdef NEPTUNE
-#define GC_COLLECT(ptls, full) _jl_gc_collect(ptls, full)
-#else
-#define GC_COLLECT(ptls, full) neptune_gc_collect(ptls, full)
-#endif
-
 JL_DLLEXPORT void jl_gc_collect(int full)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
@@ -638,10 +627,10 @@ JL_DLLEXPORT void jl_gc_collect(int full)
     //       now that the threads have all stopped and reached a safe point
     if (!jl_gc_disable_counter) {
         JL_LOCK_NOGC(&finalizers_lock);
-        if (GC_COLLECT(ptls, full)) {
+        if (neptune_gc_collect(ptls->tl_gcs, full)) {
           // TODO: determine what to needs to change in the rest of this block
             jl_gc_mark_ptrfree(ptls);
-            int ret = GC_COLLECT(ptls, 0);
+            int ret = neptune_gc_collect(ptls->tl_gcs, 0);
             (void)ret;
             assert(!ret);
         }
