@@ -29,6 +29,8 @@
 extern "C" {
 #endif
 
+#include "neptune.h"
+  
 #ifdef _MSC_VER
 JL_DLLEXPORT char *dirname(char *);
 #else
@@ -194,6 +196,7 @@ JL_DLLEXPORT void jl_atexit_hook(int exitcode)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
     if (exitcode == 0) jl_write_compiler_output();
+    neptune_exit_hook();
     jl_print_gc_stats(JL_STDERR);
     if (jl_options.code_coverage)
         jl_write_coverage_data();

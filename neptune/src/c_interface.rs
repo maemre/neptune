@@ -1077,6 +1077,16 @@ pub extern fn neptune_setmark_buf(gc: &mut Gc2, o: * mut JlValue, mark_mode: u8,
     gc.setmark_buf(o, mark_mode, minsz);
 }
 
+#[no_mangle]
+pub extern fn neptune_exit_hook() {
+    let sum = mark_stack_sum.load(Ordering::Relaxed);
+    let max = mark_stack_max.load(Ordering::Relaxed);
+    let min = mark_stack_min.load(Ordering::Relaxed);
+    let num = mark_stack_num.load(Ordering::Relaxed);
+    let avg = sum as f64 / (num as f64).max(1.0);
+    println!("Mark stack size Σ: {} avg: {} min: {} max: {} #invoke: {}", sum, avg, min, max, num);
+}
+
 //----------------------------------------------------------------------------------
 // Write barrier entry points
 #[no_mangle]

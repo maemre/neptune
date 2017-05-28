@@ -14,6 +14,7 @@ use util::*;
 use std::collections::HashSet;
 use std::env;
 use threadpool::ThreadPool;
+use std::cmp;
 
 const PURGE_FREED_MEMORY: bool = false;
 
@@ -63,6 +64,11 @@ static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
 const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(), size_of isn't a const fn yet :(
 
 static GC_ALREADY_RUN: AtomicBool = AtomicBool::new(false);
+
+pub static mark_stack_sum: AtomicUsize = AtomicUsize::new(0);
+pub static mark_stack_max: AtomicUsize = AtomicUsize::new(0);
+pub static mark_stack_min: AtomicUsize = AtomicUsize::new(usize::max_value());
+pub static mark_stack_num: AtomicUsize = AtomicUsize::new(0);
 
 /*
  * in julia/src/julia.h:
@@ -1756,6 +1762,13 @@ impl<'a> Gc2<'a> {
 
     /// Visit all objects queued to the mark stack
     pub fn visit_mark_stack(&mut self) {
+        if ! self.mark_stack.is_empty() {
+            let l = self.mark_stack.len();
+            mark_stack_sum.fetch_add(l, Ordering::Relaxed);
+            mark_stack_num.fetch_add(1, Ordering::Relaxed);
+            mark_stack_max.store(cmp::max(mark_stack_max.load(Ordering::SeqCst), l), Ordering::SeqCst);
+            mark_stack_min.store(cmp::min(mark_stack_min.load(Ordering::SeqCst), l), Ordering::SeqCst);
+        }
         while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
             let v = self.mark_stack.pop().unwrap();
             let header = unsafe { &*as_jltaggedvalue(v) }.read_header();
