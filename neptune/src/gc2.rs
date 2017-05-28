@@ -1884,6 +1884,7 @@ impl<'a> Gc2<'a> {
         // TODO: get this from page manager
         let regions = unsafe { REGIONS.as_mut().unwrap() };
         let remaining_pages = Arc::new(AtomicUsize::new(self.pg_mgr.current_pg_count)); // Arc+AtomicUsize in preparation for sharing among threads
+        let pg_mgr: Arc<Mutex<& mut PageMgr>> = Arc::new(Mutex::new(self.pg_mgr));
         for region in regions {
 
             if remaining_pages.load(Ordering::SeqCst) == 0 {
@@ -1893,14 +1894,23 @@ impl<'a> Gc2<'a> {
             // entry in allocmap
             let check_incomplete_chunk = (region.pg_cnt % 32 != 0) as usize;
             for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
-                //np_threads.unwrap().execute(|| {self.sweep_pool_chunk(region, i, remaining_pages, full)});
-                self.sweep_pool_chunk(region, i, &remaining_pages, full);
+                Gc2::sweep_pool_chunk(pg_mgr.clone(), region, i, &remaining_pages, full);
+                //Gc2::start_sweep_pool_chunk(pg_mgr.clone(), region, i, &remaining_pages, full); // TODO I just want to do this!!!! lifetimes...
             }
             // TODO add barrier to wait for all threads to end...
         }
     }
 
-    fn sweep_pool_chunk(&mut self, region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
+/*
+    // TODO is this the only way to have a thread start with an empty environment (i.e. wrapping the real call in a function like this?) ?
+    fn start_sweep_pool_chunk(pg_mgr: Arc<Mutex<&mut PageMgr>>, region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
+        np_threads.unwrap().execute(|| {
+            Gc2::sweep_pool_chunk(pg_mgr, region, i, &remaining_pages, full)
+        });
+    }
+*/
+
+    fn sweep_pool_chunk(pg_mgr: Arc<Mutex<&mut PageMgr>>, region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
       let mut m = region.allocmap[i];
       let mut j = 0;
       while m != 0 {
@@ -1967,7 +1977,7 @@ impl<'a> Gc2<'a> {
           if should_free {
               // page is unused, free it. we are being a little bit more aggressive here
               // we need to tell Rust that moving regions here is safe somehow.
-              self.pg_mgr.free_page_in_region(region, pg_idx);
+              pg_mgr.lock().unwrap().free_page_in_region(region, pg_idx);
           }
 
           if remaining_pages.fetch_sub(1, Ordering::SeqCst) - 1 == 0 {
