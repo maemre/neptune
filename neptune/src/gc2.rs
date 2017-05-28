@@ -1896,92 +1896,109 @@ impl<'a> Gc2<'a> {
         self.clear_freelists();
         // TODO: get this from page manager
         let regions = unsafe { REGIONS.as_mut().unwrap() };
-        let mut remaining_pages = self.pg_mgr.current_pg_count;
-        'finish: for region in regions {
-            if remaining_pages == 0 {
+        let remaining_pages = Arc::new(AtomicUsize::new(self.pg_mgr.current_pg_count)); // Arc+AtomicUsize in preparation for sharing among threads
+        let pg_mgr: Arc<Mutex<& mut PageMgr>> = Arc::new(Mutex::new(self.pg_mgr));
+        for region in regions {
+
+            if remaining_pages.load(Ordering::SeqCst) == 0 {
                 break;
             }
             // if #pages in region is not a multiple of 32, then we need to check one more
             // entry in allocmap
             let check_incomplete_chunk = (region.pg_cnt % 32 != 0) as usize;
             for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
-                let mut m = region.allocmap[i];
-                let mut j = 0;
-                while m != 0 {
-                    let pg_idx = 32 * i + j;
-                    // if current page is not allocated, skip
-                    if m & 1 == 0 {
-                        m >>= 1;
-                        j += 1;
-                        continue;
-                    }
-                    // whether current page should be freed completely
-                    let mut should_free = false;
-                    // if current page is to be swept
-                    // a page is to be swept if it contains young objects or we are
-                    // doing a full sweep
-                    // TODO: change has_young to bool
-                    if full || region.meta[pg_idx].has_young != 0 {
-                        let meta = &region.meta[pg_idx];
-                        let size = mem::size_of::<JlTaggedValue>() + meta.osize as usize;
-                        let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;
-                        let padding = (size - JL_SMALL_BYTE_ALIGNMENT) % JL_SMALL_BYTE_ALIGNMENT;
-                        let n_obj = aligned_pg_size / (size + padding) as usize;
-                        let page = &mut region.pages[pg_idx];
-                        let mut nfree = 0;
-                        for o_idx in 0..n_obj {
-                            let o = unsafe {
-                                mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
-                            };
-                            if ! o.marked() {
-                                nfree += 1;
-                            }
-                        }
-                        if nfree != n_obj {
-                            // there are live objects in the page, return free objects to the corresponding free list
-                            let tl_gc: &mut Gc2 = unsafe {
-                                &mut *(get_all_tls()[meta.thread_n as usize].tl_gcs)
-                            };
-                            let freelist = &mut tl_gc.heap.pools[meta.pool_n as usize].freelist;
-                            for o_idx in 0..n_obj {
-                                let o = unsafe {
-                                    mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
-                                };
-
-                                if o.marked() {
-                                    // clear marks during sweep
-                                    o.set_marked(false);
-
-                                    if full || ! o.old() {
-                                        // it is a young object survived till next full sweep, promote it
-                                        o.set_old(true);
-                                    }
-                                    // TODO: better promotion, similar to original one in Julia
-                                } else {
-                                    freelist.push(o);
-                                }
-                            }
-                        } else {
-                            // page doesn't have anything alive in it, mark it for freeing
-                            // TODO: do lazy sweeping with resets etc.
-                            should_free = true;
-                        }
-                    }
-                    // we free the page here to make borrow checker happy
-                    if should_free {
-                        // page is unused, free it. we are being a little bit more aggressive here
-                        // we need to tell Rust that moving regions here is safe somehow.
-                        self.pg_mgr.free_page_in_region(region, pg_idx);
-                    }
-                    remaining_pages -= 1;
-                    if remaining_pages == 0 {
-                        break 'finish;
-                    }
-                    m >>= 1;
-                    j += 1;
-                }
+                Gc2::sweep_pool_chunk(pg_mgr.clone(), region, i, &remaining_pages, full);
+                //Gc2::start_sweep_pool_chunk(pg_mgr.clone(), region, i, &remaining_pages, full); // TODO I just want to do this!!!! lifetimes...
             }
+            // TODO add barrier to wait for all threads to end...
         }
+    }
+
+/*
+    // TODO is this the only way to have a thread start with an empty environment (i.e. wrapping the real call in a function like this?) ?
+    fn start_sweep_pool_chunk(pg_mgr: Arc<Mutex<&mut PageMgr>>, region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
+        np_threads.unwrap().execute(|| {
+            Gc2::sweep_pool_chunk(pg_mgr, region, i, &remaining_pages, full)
+        });
+    }
+*/
+
+    fn sweep_pool_chunk(pg_mgr: Arc<Mutex<&mut PageMgr>>, region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
+      let mut m = region.allocmap[i];
+      let mut j = 0;
+      while m != 0 {
+          let pg_idx = 32 * i + j;
+          // if current page is not allocated, skip
+          if m & 1 == 0 {
+              m >>= 1;
+              j += 1;
+              continue;
+          }
+          // whether current page should be freed completely
+          let mut should_free = false;
+          // if current page is to be swept
+          // a page is to be swept if it contains young objects or we are
+          // doing a full sweep
+          // TODO: change has_young to bool
+          if full || region.meta[pg_idx].has_young != 0 {
+              let meta = &region.meta[pg_idx];
+              let size = mem::size_of::<JlTaggedValue>() + meta.osize as usize;
+              let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;
+              let padding = (size - JL_SMALL_BYTE_ALIGNMENT) % JL_SMALL_BYTE_ALIGNMENT;
+              let n_obj = aligned_pg_size / (size + padding) as usize;
+              let page = &mut region.pages[pg_idx];
+              let mut nfree = 0;
+              for o_idx in 0..n_obj {
+                  let o = unsafe {
+                      mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
+                  };
+                  if ! o.marked() {
+                      nfree += 1;
+                  }
+              }
+              if nfree != n_obj {
+                  // there are live objects in the page, return free objects to the corresponding free list
+                  let tl_gc: &mut Gc2 = unsafe {
+                      &mut *(get_all_tls()[meta.thread_n as usize].tl_gcs)
+                  };
+                  let freelist = &mut tl_gc.heap.pools[meta.pool_n as usize].freelist;
+                  for o_idx in 0..n_obj {
+                      let o = unsafe {
+                          mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
+                      };
+
+                      if o.marked() {
+                          // clear marks during sweep
+                          o.set_marked(false);
+
+                          if full || ! o.old() {
+                              // it is a young object survived till next full sweep, promote it
+                              o.set_old(true);
+                          }
+                          // TODO: better promotion, similar to original one in Julia
+                      } else {
+                          freelist.push(o);
+                      }
+                  }
+              } else {
+                  // page doesn't have anything alive in it, mark it for freeing
+                  // TODO: do lazy sweeping with resets etc.
+                  should_free = true;
+              }
+          }
+          // we free the page here to make borrow checker happy
+          if should_free {
+              // page is unused, free it. we are being a little bit more aggressive here
+              // we need to tell Rust that moving regions here is safe somehow.
+              pg_mgr.lock().unwrap().free_page_in_region(region, pg_idx);
+          }
+
+          if remaining_pages.fetch_sub(1, Ordering::SeqCst) - 1 == 0 {
+              break;
+          }
+          m >>= 1;
+          j += 1;
+      }
     }
 
     // sweep bigvals in all threads
