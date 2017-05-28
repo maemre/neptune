@@ -15,7 +15,6 @@
 // to iterate over ranges with steps different than 1
 #![feature(step_by)]
 extern crate libc;
-extern crate bit_field;
 extern crate core;
 extern crate alloc;
 extern crate threadpool;

@@ -1,5 +1,4 @@
 use libc::*;
-use bit_field::BitField;
 use pages::*;
 use gc2::*;
 use util::*;

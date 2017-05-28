@@ -17,12 +17,12 @@ use std::mem;
 use core::ops::Deref;
 use core::ops::DerefMut;
 use core;
-use bit_field::BitField;
 use std::sync::atomic::*;
 use std::ffi::CString;
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
+use util::*;
 
 #[repr(C)]
 #[derive(Copy, Clone)]

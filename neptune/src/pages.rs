@@ -8,7 +8,6 @@ use libc;
 use std::mem;
 use std::cmp;
 use util::*;
-use bit_field::BitField;
 use core;
 use std::panic;
 

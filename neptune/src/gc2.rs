@@ -3,7 +3,6 @@ use pages::*;
 use std::mem;
 use gc::*;
 use c_interface::*;
-use bit_field::BitField;
 use alloc;
 use std::intrinsics;
 use std::sync::atomic::*;
