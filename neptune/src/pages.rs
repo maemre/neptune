@@ -9,7 +9,6 @@ use std::mem;
 use std::cmp;
 use util::*;
 use core;
-use std::panic;
 
 // max. page count per region.
 // From: https://doc.rust-lang.org/reference.html#conditional-compilation
@@ -152,10 +151,6 @@ impl PageMgr {
     }
 
     pub fn alloc_region_mem<'a>(&self, pg_cnt: usize) -> Option<Region<'a>> {
-        let pages_sz = mem::size_of::<Page>() * pg_cnt;
-        let freemap_sz = mem::size_of::<u32>() * pg_cnt / 32;
-        let meta_sz =  pg_cnt;
-
         let mut region = Region::new();
         println!("allocated a new region with page count: {}", pg_cnt);
         // TODO: handle failure for this gracefully
@@ -261,7 +256,7 @@ impl PageMgr {
             }
         }
 
-        let mut pg_idx = pg_idx.unwrap();
+        let pg_idx = pg_idx.unwrap();
         let i = reg_idx.unwrap();
 
         self.free_page_in_region(&mut regions[i], pg_idx);
@@ -278,12 +273,12 @@ impl PageMgr {
         // decommit code
 
         // figure out #pages to decommit
-        let mut decommit_size = PAGE_SZ;
-        let mut page_ptr: Option<*const libc::c_void> = None;
+        // let mut decommit_size = PAGE_SZ;
+        // let mut page_ptr: Option<*const libc::c_void> = None;
         let mut should_decommit = true;
         if PAGE_SZ < jl_page_size {
             let n_pages = (PAGE_SZ + jl_page_size - 1) / PAGE_SZ; // size of OS pages in terms of our pages
-            decommit_size = jl_page_size;
+            // decommit_size = jl_page_size;
 
             // hacky pointer magic for figuring out OS page alignment
             let page_ptr = unsafe {

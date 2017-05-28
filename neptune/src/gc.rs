@@ -154,7 +154,7 @@ impl<'a> Gc<'a> {
 pub struct BigVal {
     next: * mut c_void, // unused
     prev: * mut c_void, // unused
-    pub szOrAge: usize, // unpack this union via methods
+    pub sz_or_age: usize, // unpack this union via methods
     // if this bigval belongs to any thread's big object list, which one. -1 denotes big_objects_marked. Invalid if in_list is false
     pub tid: i16,
     // is this object in cache
@@ -188,32 +188,32 @@ impl BigVal {
 
     #[inline(always)]
     pub fn size(&self) -> usize {
-        self.szOrAge.get_bits(2..64) << 2
+        self.sz_or_age.get_bits(2..64) << 2
     }
 
     #[inline(always)]
     pub fn set_size(&mut self, size: usize) {
         debug_assert_eq!(size & 3, 0);
-        self.szOrAge.set_bits(2..64, size >> 2);
+        self.sz_or_age.set_bits(2..64, size >> 2);
     }
 
     #[inline(always)]
     pub fn age(&self) -> usize {
         // subject to change based on endianness
-        self.szOrAge.get_bits(0..2)
+        self.sz_or_age.get_bits(0..2)
     }
 
     #[inline(always)]
     pub fn set_age(&mut self, age: usize) {
-        self.szOrAge.set_bits(0..2, age);
+        self.sz_or_age.set_bits(0..2, age);
     }
 
     /// Increment age while saturating it when it reaches the promotion age
     #[inline(always)]
     pub fn inc_age(&mut self) {
-        let age = self.szOrAge.get_bits(0..2);
+        let age = self.sz_or_age.get_bits(0..2);
         if age < PROMOTE_AGE {
-            self.szOrAge.set_bits(0..2, age + 1);
+            self.sz_or_age.set_bits(0..2, age + 1);
         }
     }
 

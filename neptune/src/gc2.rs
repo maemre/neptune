@@ -734,7 +734,7 @@ impl<'a> Gc2<'a> {
             (*ptr).tid = self.tls.tid;
             (*ptr).in_list = true;
             (*ptr).slot = self.heap.big_objects.len();
-            (*ptr).szOrAge = size;
+            (*ptr).sz_or_age = size;
             (*ptr).set_age(0);
             let taggedvalue: &mut JlTaggedValue = (*ptr).mut_taggedvalue();
             (&mut *ptr, taggedvalue)
