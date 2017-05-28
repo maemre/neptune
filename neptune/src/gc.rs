@@ -6,7 +6,6 @@ use std::mem;
 use std::env;
 use std::num;
 use c_interface::*;
-use threadpool::ThreadPool;
 use std::sync::atomic::*;
 
 // Errors that can be encountered during Gc initialization
@@ -127,7 +126,6 @@ pub struct Gc<'a> {
     pub lazy_freed_pages: i64,
     pub page_mgr: PageMgr,
     pub page_size: usize,
-    pub thread_pool: Option<ThreadPool>,
 }
 
 // GC implementation
@@ -139,15 +137,6 @@ impl<'a> Gc<'a> {
         for _ in 0..REGION_COUNT {
             regions.push(Region::new());
         }
-        // create thread pool
-        let nthreads = match ::std::env::var("NEPTUNE_THREADS").map_err(GcInitError::Env).and_then(|nthreads| {
-            nthreads.parse::<usize>().map_err(GcInitError::Parse)
-        }) {
-            Ok(0) => panic!("Garbage collector cannot work with 0 worker threads! Set NEPTUNE_THREADS to a positive number."),
-            Ok(n) => n,
-            Err(GcInitError::Env(env::VarError::NotPresent)) => 1, // if no environment variable given, assume 1
-            Err(_) => panic!("Expected environment variable NEPTUNE_THREADS to be defined as a positive number.")
-        };
 
         // create global GC object
         Gc {
@@ -160,7 +149,6 @@ impl<'a> Gc<'a> {
             lazy_freed_pages: 0,
             page_mgr: PageMgr::new(),
             page_size: page_size, // equivalent of jl_page_size, size of OS' pages
-            thread_pool: None, // Some(ThreadPool::new(nthreads)),
         }
     }
 

@@ -12,6 +12,8 @@ use std::ffi::CStr;
 use std::ops::Range;
 use util::*;
 use std::collections::HashSet;
+use std::env;
+use threadpool::ThreadPool;
 
 const PURGE_FREED_MEMORY: bool = false;
 
@@ -32,6 +34,8 @@ const MAX_COLLECT_INTERVAL: usize = 1250000000;
 
 // offset for aligning data in page to 16 bytes (JL_SMALL_BYTE_ALIGNMENT) after tag.
 pub const GC_PAGE_OFFSET: usize = (JL_SMALL_BYTE_ALIGNMENT - (SIZE_OF_JLTAGGEDVALUE % JL_SMALL_BYTE_ALIGNMENT));
+
+pub static mut np_threads: Option<ThreadPool> = None;
 
 static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
     // minimum platform alignment
@@ -543,6 +547,18 @@ pub struct Gc2<'a> {
 
 impl<'a> Gc2<'a> {
     pub fn new(tls: &'static mut JlTLS, pg_mgr: &'a mut PageMgr) -> Self {
+
+        // create thread pool for parallelizing marking and sweeping
+        let num_threads = match ::std::env::var("NEPTUNE_THREADS").map_err(GcInitError::Env).and_then(|nthreads| {
+            nthreads.parse::<usize>().map_err(GcInitError::Parse)
+        }) {
+            Ok(0) => panic!("Garbage collector cannot work with 0 worker threads! Set NEPTUNE_THREADS to a positive number."),
+            Ok(n) => n,
+            Err(GcInitError::Env(env::VarError::NotPresent)) => 1, // if no environment variable given, assume 1
+            Err(_) => panic!("Expected environment variable NEPTUNE_THREADS to be defined as a positive number.")
+        };
+        unsafe { np_threads = Some(ThreadPool::new(num_threads)) };
+
        Gc2 {
            heap: ThreadHeap::new(),
            pg_mgr: pg_mgr,
