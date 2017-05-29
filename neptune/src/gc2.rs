@@ -17,6 +17,9 @@ use threadpool::ThreadPool;
 use std::cmp;
 use concurrency::*;
 
+extern crate scoped_threadpool;
+use self::scoped_threadpool::Pool;
+
 const PURGE_FREED_MEMORY: bool = false;
 
 const TAG_BITS: u8 = 2; // number of tag bits
@@ -37,7 +40,7 @@ const MAX_COLLECT_INTERVAL: usize = 1250000000;
 // offset for aligning data in page to 16 bytes (JL_SMALL_BYTE_ALIGNMENT) after tag.
 pub const GC_PAGE_OFFSET: usize = (JL_SMALL_BYTE_ALIGNMENT - (SIZE_OF_JLTAGGEDVALUE % JL_SMALL_BYTE_ALIGNMENT));
 
-pub static mut np_threads: Option<ThreadPool> = None;
+pub static mut np_threads: Option<Pool> = None;
 
 static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
     // minimum platform alignment
@@ -1128,9 +1131,11 @@ impl Marking {
             debug_assert_ne!(header, 0);
             let tx = tx.clone();
             self.scan_obj3(&(v as * mut JlValue), 0, header);
-            thread_pool.execute(move || {
+            thread_pool.scoped(|scope| {
+              scope.execute(move || {
                 // signal that this job is done
                 tx.send(());
+             });
             });
 
             n_jobs += 1;
@@ -1378,7 +1383,7 @@ impl<'a> Gc2<'a> {
             Err(GcInitError::Env(env::VarError::NotPresent)) => 1, // if no environment variable given, assume 1
             Err(_) => panic!("Expected environment variable NEPTUNE_THREADS to be defined as a positive number.")
         };
-        unsafe { np_threads = Some(ThreadPool::new(num_threads)) };
+        unsafe { np_threads = Some(Pool::new(num_threads as u32)) };
 
        Gc2 {
            heap: ThreadHeap::new(),
@@ -1979,21 +1984,22 @@ impl<'a> Gc2<'a> {
             // entry in allocmap
             let check_incomplete_chunk = (region.pg_cnt % 32 != 0) as usize;
             for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
-                Gc2::sweep_pool_chunk(region, i, &remaining_pages, full);
-                //Gc2::start_sweep_pool_chunk(region, i, &remaining_pages, full); // TODO I just want to do this!!!! lifetimes...
+                //Gc2::sweep_pool_chunk(region, i, &remaining_pages, full);
+                Gc2::start_sweep_pool_chunk(region, i, &remaining_pages, full);
             }
             // TODO add barrier to wait for all threads to end...
         }
     }
 
-/*
-    // TODO is this the only way to have a thread start with an empty environment (i.e. wrapping the real call in a function like this?) ?
     fn start_sweep_pool_chunk(region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
-        np_threads.unwrap().execute(|| {
+        let mut pool = unsafe { np_threads.as_mut().unwrap() };
+        pool.scoped(|scope| {
+          scope.execute(|| {
+            //println!("Thread executing sweep_pool_chunk()");
             Gc2::sweep_pool_chunk(region, i, &remaining_pages, full)
+            });
         });
     }
-*/
 
     fn sweep_pool_chunk(region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
         let mut bytes_freed = 0;
