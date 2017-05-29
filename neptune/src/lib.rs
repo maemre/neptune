@@ -22,6 +22,7 @@ extern crate threadpool;
 //#[cfg(test)]
 //mod tests;
 
+mod concurrency;
 mod gc;
 pub mod pages;
 pub mod util;
