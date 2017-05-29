@@ -11,11 +11,10 @@ use std::slice;
 use std::ffi::CStr;
 use std::ops::Range;
 use util::*;
-use std::collections::HashSet;
 use std::env;
-use threadpool::ThreadPool;
 use std::cmp;
 use concurrency::*;
+use scoped_threadpool::Pool;
 
 const PURGE_FREED_MEMORY: bool = false;
 
@@ -37,7 +36,7 @@ const MAX_COLLECT_INTERVAL: usize = 1250000000;
 // offset for aligning data in page to 16 bytes (JL_SMALL_BYTE_ALIGNMENT) after tag.
 pub const GC_PAGE_OFFSET: usize = (JL_SMALL_BYTE_ALIGNMENT - (SIZE_OF_JLTAGGEDVALUE % JL_SMALL_BYTE_ALIGNMENT));
 
-pub static mut np_threads: Option<ThreadPool> = None;
+pub static mut np_threads: Option<Pool> = None;
 
 static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
     // minimum platform alignment
@@ -738,7 +737,7 @@ impl Marking {
         }
     }
 
-    pub fn mark_roots(&mut self) {
+    pub fn mark_roots(&self) {
         // modules
         self.push_root(unsafe { (*jl_main_module).as_mut_jlvalue() }, 0);
         self.push_root(unsafe { (*jl_internal_main_module).as_mut_jlvalue() }, 0);
@@ -770,7 +769,7 @@ impl Marking {
         self.push_root(unsafe { (*jl_emptytuple_type).as_mut_jlvalue() }, 0);
     }
 
-    pub fn walk_roots(&mut self) {
+    pub fn walk_roots(&self) {
         debug_assert!(self.mark_stack.is_empty());
 
         // finished premark, mark remsets and thread local roots
@@ -785,7 +784,7 @@ impl Marking {
         self.visit_mark_stack(); // this function processes all the pushed roots
     }
 
-    pub fn mark_finalizers(&mut self, orig_marked_len: usize) {
+    pub fn mark_finalizers(&self, orig_marked_len: usize) {
         // mark remaining finalizers
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
@@ -812,7 +811,7 @@ impl Marking {
         set_mark_reset_age(0);
     }
 
-    fn push_root(&mut self, e: *mut JlValue, d: i32) -> i32 {
+    fn push_root(&self, e: *mut JlValue, d: i32) -> i32 {
         // N.B. Julia has `gc_findval` to interact with GDB for finding the gc-root for a value.
         // We should implement something similar for simpler debugging
 
@@ -836,20 +835,20 @@ impl Marking {
     }
 
     #[inline(always)]
-    fn push_root_if_not_null<T: JlValueLike>(&mut self, p: * mut T, d: i32) {
+    fn push_root_if_not_null<T: JlValueLike>(&self, p: * mut T, d: i32) {
         if ! p.is_null() {
             self.push_root(unsafe { (* p).as_mut_jlvalue() }, d);
         }
     }
 
     #[inline(always)]
-    fn scan_obj3(&mut self, v: &* mut JlValue, d: i32, tag: usize) {
+    fn scan_obj3(&self, v: &* mut JlValue, d: i32, tag: usize) {
         self.scan_obj(v, d, tag & !15, (tag & 0xf) as u8);
     }
 
     // Julia's gc marks the object and recursively marks its children, queueing objecs
     // on mark stack when recursion depth is too great.
-    fn scan_obj(&mut self, v: &*mut JlValue, _d: i32, tag: libc::uintptr_t, bits: u8) {
+    fn scan_obj(&self, v: &*mut JlValue, _d: i32, tag: libc::uintptr_t, bits: u8) {
         let vt: *const JlDatatype = tag as *mut JlDatatype;
         let mut nptr = 0;
         let mut refyoung = 0;
@@ -975,7 +974,7 @@ impl Marking {
     }
 
     /// Update metadata of a marked object without scanning it
-    fn mark_obj(&mut self, v: * mut JlValue, tag: usize, bits: u8) {
+    fn mark_obj(&self, v: * mut JlValue, tag: usize, bits: u8) {
         debug_assert!(! v.is_null());
         debug_assert!((bits as usize).marked());
 
@@ -1077,7 +1076,7 @@ impl Marking {
         ! old_tag.marked()
     }
 
-    fn mark_remset(&mut self, other: &mut Gc2) {
+    fn mark_remset(&self, other: &mut Gc2) {
         for i in 0..other.heap.last_remset.len() {
             // cannot borrow array item because non-lexical borrowing hasn't landed to Rust yet
             let item = other.heap.last_remset[i].clone();
@@ -1105,7 +1104,7 @@ impl Marking {
     }
 
     /// Visit all objects queued to the mark stack
-    pub fn visit_mark_stack(&mut self) {
+    pub fn visit_mark_stack(&self) {
         let thread_pool = unsafe {
             np_threads.as_mut().unwrap()
         };
@@ -1153,7 +1152,7 @@ impl Marking {
         *mem::transmute::<usize, * const usize>(real_addr)
     }
 
-    fn mark_rt_stack(&mut self, sinit: * mut GcFrame, offset: usize, lb: usize, ub: usize, d: i32) {
+    fn mark_rt_stack(&self, sinit: * mut GcFrame, offset: usize, lb: usize, ub: usize, d: i32) {
         // leave all hope, ye who enter here
         // for that there is no more safety guarantees and only memory transmutation
 
@@ -1201,7 +1200,7 @@ impl Marking {
         }
     }
 
-    pub fn mark_thread_local(&mut self, other: &mut Gc2) {
+    pub fn mark_thread_local(&self, other: &mut Gc2) {
         let ref tls = other.tls;
         let m = tls.current_module.clone();
         let ct = tls.current_task.clone();
@@ -1216,7 +1215,7 @@ impl Marking {
         self.push_root_if_not_null(ta, 0);
     }
 
-    fn mark_module(&mut self, m: &mut JlModule, d: i32, bits: u8) -> i32 {
+    fn mark_module(&self, m: &mut JlModule, d: i32, bits: u8) -> i32 {
         let mut refyoung = 0;
         let mut table = unsafe {
             slice::from_raw_parts_mut(m.bindings.table, m.bindings.size)
@@ -1257,7 +1256,7 @@ impl Marking {
         refyoung
     }
 
-    fn gc_mark_task(&mut self, ta: &mut JlTask, d: i32, bits: u8) {
+    fn gc_mark_task(&self, ta: &mut JlTask, d: i32, bits: u8) {
         if ! ta.parent.is_null() {
             self.push_root(unsafe { (&mut *ta.parent).as_mut_jlvalue() }, d);
         }
@@ -1282,7 +1281,7 @@ impl Marking {
         self.gc_mark_task_stack(ta, d, bits);
     }
 
-    fn gc_mark_task_stack(&mut self, ta: &mut JlTask, d: i32, bits: u8) {
+    fn gc_mark_task_stack(&self, ta: &mut JlTask, d: i32, bits: u8) {
         unsafe {
             // TODO: make this thread-safe
             gc_scrub_record_task(ta);
@@ -1321,7 +1320,7 @@ impl Marking {
         }
     }
 
-    fn mark_object_list(&mut self, list: * mut JlArrayList, start: usize) {
+    fn mark_object_list(&self, list: * mut JlArrayList, start: usize) {
         let l = unsafe { &mut *list };
         let len = l.len;
         let items = l.as_slice_mut();
@@ -1368,18 +1367,6 @@ pub struct Gc2<'a> {
 
 impl<'a> Gc2<'a> {
     pub fn new(tls: &'static mut JlTLS) -> Self {
-
-        // create thread pool for parallelizing marking and sweeping
-        let num_threads = match ::std::env::var("NEPTUNE_THREADS").map_err(GcInitError::Env).and_then(|nthreads| {
-            nthreads.parse::<usize>().map_err(GcInitError::Parse)
-        }) {
-            Ok(0) => panic!("Garbage collector cannot work with 0 worker threads! Set NEPTUNE_THREADS to a positive number."),
-            Ok(n) => n,
-            Err(GcInitError::Env(env::VarError::NotPresent)) => 1, // if no environment variable given, assume 1
-            Err(_) => panic!("Expected environment variable NEPTUNE_THREADS to be defined as a positive number.")
-        };
-        unsafe { np_threads = Some(ThreadPool::new(num_threads)) };
-
        Gc2 {
            heap: ThreadHeap::new(),
            cache: MarkCache::new(),

@@ -25,6 +25,8 @@ use std::collections::HashSet;
 use util::*;
 use concurrency::*;
 use std::sync::*;
+use std::env;
+use scoped_threadpool::Pool;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -722,10 +724,6 @@ pub fn jl_value_of_mut(t: &mut JlTaggedValue) -> &mut JlValue {
     }
 }
 
-pub fn gc_init<'a>(page_size: usize) -> Box<Gc<'a>> {
-    Box::new(Gc::new(page_size))
-}
-
 // Clean up all the memory, the Gc object passed becomes unusable.
 // Unfortunately, C cannot tell this.
 pub extern fn gc_drop(gc: Box<Gc>) {
@@ -930,16 +928,6 @@ pub static mut big_objects_marked: Option<Box<Mutex<Vec<* mut BigVal>>>> = None;
 
 #[no_mangle]
 pub unsafe extern fn neptune_init_page_mgr() {
-    // piggybacking here, TODO: move to gc_init
-    unsafe {
-        big_objects_marked = Some(Box::new(Mutex::new(Vec::new())));
-        the_global_big_obj_list = Some(Mutex::new(Vec::new()));
-        mark_cache = Some(Mutex::new(MarkCache::new()));
-    }
-
-    assert_eq!(mem::size_of::<BigVal>(), 56, "BigVal+TaggedValue should align to 64 bytes!");
-    // end of gc_init
-
     println!("page offset: {}", GC_PAGE_OFFSET);
 
     PAGE_MGR = Some(Mutex::new(PageMgr::new()));
@@ -1033,6 +1021,30 @@ pub extern fn neptune_get_pgcnt<'a>(region: &mut Region<'a>) -> u32 {
 
 //------------------------------------------------------------------------------
 // GC entry points
+
+#[no_mangle]
+pub extern fn neptune_init_gc() {
+    // piggybacking here, TODO: move to gc_init
+    unsafe {
+        big_objects_marked = Some(Box::new(Mutex::new(Vec::new())));
+        the_global_big_obj_list = Some(Mutex::new(Vec::new()));
+        mark_cache = Some(Mutex::new(MarkCache::new()));
+    }
+
+    assert_eq!(mem::size_of::<BigVal>(), 56, "BigVal+TaggedValue should align to 64 bytes!");
+    // create thread pool for parallelizing marking and sweeping
+    let num_threads = match ::std::env::var("NEPTUNE_THREADS").map_err(GcInitError::Env).and_then(|nthreads| {
+        nthreads.parse::<u32>().map_err(GcInitError::Parse)
+    }) {
+        Ok(0) => panic!("Garbage collector cannot work with 0 worker threads! Set NEPTUNE_THREADS to a positive number."),
+        Ok(n) => n,
+        Err(GcInitError::Env(env::VarError::NotPresent)) => 1, // if no environment variable given, assume single_threaded (1)
+        Err(_) => panic!("Expected environment variable NEPTUNE_THREADS to be defined as a positive number.")
+    };
+    unsafe { np_threads = Some(Pool::new(num_threads)) };
+
+    // end of gc_init
+}
 
 #[no_mangle]
 pub extern fn neptune_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize, typ: * const libc::c_void) -> &'gc mut JlValue {

@@ -5,7 +5,8 @@ authors = ["Mehmet Emre <maemre2@gmail.com>", "Michael Christensen <chmdko@gmail
 
 [dependencies]
 libc = "0.2.21"
-threadpool = "1.0"
+# threadpool = "1.0"
+scoped_threadpool = "0.1.0"
 
 [lib]
 name = "neptune"
