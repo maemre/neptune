@@ -16,10 +16,8 @@ use std::cmp;
 use concurrency::*;
 use scoped_threadpool::Pool;
 
-// parallelization flags
-const PARALLEL_MARK: bool = true;
 const PARALLEL_SWEEP: bool = true;
-
+        
 const PURGE_FREED_MEMORY: bool = false;
 
 const TAG_BITS: u8 = 2; // number of tag bits
@@ -1113,10 +1111,9 @@ impl Marking {
             np_threads.as_mut().unwrap()
         };
 
-        // Channel to synchronize when the worker threads are finished
-        let (tx, rx) = mpsc::channel();
         let mut n_jobs = 0;
-        let marker = Arc::new(self);
+        let mut n_started = Arc::new(AtomicUsize::new(0));
+        let mut n_finished = Arc::new(AtomicUsize::new(0));
 
         if ! self.mark_stack.is_empty() {
             let l = self.mark_stack.len();
@@ -1125,41 +1122,34 @@ impl Marking {
             mark_stack_max.store(cmp::max(mark_stack_max.load(Ordering::SeqCst), l), Ordering::SeqCst);
             mark_stack_min.store(cmp::min(mark_stack_min.load(Ordering::SeqCst), l), Ordering::SeqCst);
         }
-        if PARALLEL_MARK {
-            // the outer loop is for the cases where the stack becomes empty while we are synchronizing
-            while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
-                thread_pool.scoped(|scope| {
-                    while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
-                        let marker = marker.clone();
-                        // casting to let Rust send this pointer over threads
-                        let v = self.mark_stack.pop().unwrap() as usize;
-                        let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
-                        debug_assert_ne!(header, 0);
-                        let tx = tx.clone();
-                        scope.execute(move || {
-                            marker.scan_obj3(&(v as * mut JlValue), 0, header);
-                            // signal that this job is done
-                            tx.send(());
-                        });
+        // the outer loop is for the cases where the stack becomes
+        // empty while we are synchronizing
+        while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
+            // when the scope gets dropped, i.e. when this
+            // function returns, the threads will join
+            // automatically.
+            thread_pool.scoped(|scope| {
+                while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
+                    let n_started = n_started.clone();
+                    let n_finished = n_finished.clone();
+                    // casting to let Rust send this pointer over threads
+                    let v = self.mark_stack.pop().unwrap() as usize;
+                    let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
+                    debug_assert_ne!(header, 0);
+                    scope.execute(move || {
+                        n_started.fetch_add(1, Ordering::SeqCst);
+                        self.scan_obj3(&(v as * mut JlValue), 0, header);
+                        n_finished.fetch_add(1, Ordering::SeqCst);
+                    });
 
-                        n_jobs += 1;
-                    }
-                    // synchronize with the worker threads
-                    rx.iter().take(n_jobs).fold((), |x, y| {});
-                });
-            }
-        } else {
-            while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
-                let marker = marker.clone();
-                // casting to let Rust send this pointer over threads
-                let v = self.mark_stack.pop().unwrap() as usize;
-                let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
-                debug_assert_ne!(header, 0);
-                let tx = tx.clone();
-                marker.scan_obj3(&(v as * mut JlValue), 0, header);
-                n_jobs += 1;
-            }
+                    n_jobs += 1;
+                }
+            });
+
+            assert_eq!(n_started.load(Ordering::SeqCst), n_finished.load(Ordering::SeqCst));
+            assert_eq!(n_started.load(Ordering::SeqCst), n_jobs);
         }
+
         assert!(self.mark_stack.is_empty());
     }
 

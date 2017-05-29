@@ -1041,6 +1041,7 @@ pub extern fn neptune_init_gc() {
         Err(GcInitError::Env(env::VarError::NotPresent)) => 1, // if no environment variable given, assume single_threaded (1)
         Err(_) => panic!("Expected environment variable NEPTUNE_THREADS to be defined as a positive number.")
     };
+    println!("Starting neptune with {} threads", num_threads);
     unsafe { np_threads = Some(Pool::new(num_threads)) };
 
     // end of gc_init
