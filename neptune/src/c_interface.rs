@@ -814,7 +814,6 @@ pub struct JlTLS {
     pub in_pure_callback: c_int,
     pub finalizers_inhibited: c_int,
     pub finalizers: JlArrayList,
-    pub gc_cache: GcMarkCache,
     // pointer to thread-local GC-related stuff, lifetime is meaningless!
     pub tl_gcs: * mut Gc2<'static>,
 }
@@ -1132,4 +1131,12 @@ pub unsafe extern fn neptune_remset_len_(gc: &mut Gc2, last_remset: u8) -> usize
 #[no_mangle]
 pub unsafe extern fn neptune_remset_nptr(gc: &mut Gc2) -> usize {
     gc.heap.remset_nptr
+}
+
+//------------------------------------------------------------------------------
+// Access to GC cache
+
+#[no_mangle]
+pub extern fn neptune_log_perm_scanned_bytes(gc: &mut Gc2, newly_scanned_bytes: usize) {
+    gc.cache.perm_scanned_bytes += newly_scanned_bytes;
 }

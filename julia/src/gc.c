@@ -812,7 +812,7 @@ static void *gc_managed_realloc_(jl_ptls_t ptls, void *d, size_t sz, size_t olds
         jl_throw(jl_memory_exception);
 
     if (jl_astaggedvalue(owner)->bits.gc == GC_OLD_MARKED) {
-        ptls->gc_cache.perm_scanned_bytes += allocsz - oldsz;
+        neptune_log_perm_scanned_bytes(ptls->tl_gcs, allocsz - oldsz);
         live_bytes += allocsz - oldsz;
     }
     else if (allocsz < oldsz)

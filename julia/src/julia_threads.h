@@ -138,7 +138,6 @@ typedef struct _jl_tls_states_t {
     // Counter to disable finalizer **on the current thread**
     int finalizers_inhibited;
     arraylist_t finalizers;
-    jl_gc_mark_cache_t gc_cache;
 
     tl_gcs_t *tl_gcs;
 } jl_tls_states_t;

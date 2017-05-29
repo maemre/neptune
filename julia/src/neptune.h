@@ -32,6 +32,11 @@ size_t neptune_remset_nptr(tl_gcs_t *gc);
 #define neptune_remset_len(ptls) neptune_remset_len_(ptls->tl_gcs, 0)
 #define neptune_last_remset_len(ptls) neptune_remset_len_(ptls->tl_gcs, 1)
 
+// exit hook
+
 void neptune_exit_hook(void);
+
+// logs perm. scanned bytes to corresponding GC cache
+void neptune_log_perm_scanned_bytes(tl_gcs_t *gc, size_t perm_scanned_bytes);
 
 #endif // NEPTUNE_H
