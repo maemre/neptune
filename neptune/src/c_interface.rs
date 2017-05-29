@@ -834,6 +834,14 @@ pub enum GcState {
 // expose page manager
 static mut PAGE_MGR: Option<PageMgr> = None;
 
+/// Expose the global page manager. This is not thread-safe right now.
+#[inline(always)]
+pub fn pg_mgr() -> &'static mut PageMgr {
+    unsafe {
+        PAGE_MGR.as_mut().unwrap()
+    }
+}
+
 // julia's GC's regions are slightly different, using naked pointers etc.
 #[repr(C)]
 pub struct JlRegion<'a> {
@@ -921,6 +929,8 @@ pub unsafe extern fn neptune_init_page_mgr() {
     // piggybacking here, TODO: move to gc_init
     unsafe {
         big_objects_marked = Some(Box::new(Mutex::new(Vec::new())));
+        the_global_big_obj_list = Some(Mutex::new(Vec::new()));
+        mark_cache = Some(Mutex::new(MarkCache::new()));
     }
 
     assert_eq!(mem::size_of::<BigVal>(), 56, "BigVal+TaggedValue should align to 64 bytes!");
@@ -1038,10 +1048,7 @@ pub extern fn neptune_big_alloc<'gc, 'a>(gc: &'gc mut Gc2<'a>, size: usize) -> &
 #[no_mangle]
 pub extern fn neptune_init_thread_local_gc<'a>(tls: &'static mut JlTLS) -> Box<Gc2<'a>> {
     println!("{} {}", mem::size_of::<JlSVec>(), mem::size_of::<JlTask>());
-    let pg_mgr = unsafe {
-        PAGE_MGR.as_mut().unwrap()
-    };
-    Box::new(Gc2::new(tls, pg_mgr))
+    Box::new(Gc2::new(tls))
 }
 
 // Corresponds to _jl_gc_collect
@@ -1058,22 +1065,22 @@ pub unsafe extern fn jl_gc_track_malloced_array(tls: &'static mut JlTLS, a: * mu
 
 #[no_mangle]
 pub extern fn neptune_visit_mark_stack(gc: &mut Gc2) {
-    gc.visit_mark_stack();
+    gc.marking.visit_mark_stack();
 }
 
 #[no_mangle]
 pub extern fn neptune_mark_roots(gc: &mut Gc2) {
-    gc.mark_roots();
+    gc.marking.mark_roots();
 }
 
 #[no_mangle]
 pub extern fn neptune_mark_thread_local(gc: &mut Gc2, gc2: &mut Gc2) {
-    gc.mark_thread_local(gc2);
+    gc.marking.mark_thread_local(gc2);
 }
 
 #[no_mangle]
 pub extern fn neptune_setmark_buf(gc: &mut Gc2, o: * mut JlValue, mark_mode: u8, minsz: usize) {
-    gc.setmark_buf(o, mark_mode, minsz);
+    gc.cache.setmark_buf(o, mark_mode, minsz);
 }
 
 #[no_mangle]

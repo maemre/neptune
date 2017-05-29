@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::env;
 use threadpool::ThreadPool;
 use std::cmp;
+use concurrency::*;
 
 const PURGE_FREED_MEMORY: bool = false;
 
@@ -504,23 +505,216 @@ impl<'a> ThreadHeap<'a> {
     }
 }
 
-#[repr(C)]
-pub struct GcMarkCache {
+const BIG_OBJ_CACHE_SIZE: usize = 1024;
+
+pub struct MarkCache {
     // thread-local statistics, will be merged into global during stop-the-world
     pub perm_scanned_bytes: usize,
     pub scanned_bytes: usize,
     pub nbig_obj: usize, // # of queued big objects to be moved to old gen.
-    pub big_obj: [* mut BigVal; 1024],
+    pub big_obj: [* mut BigVal; BIG_OBJ_CACHE_SIZE],
+    // GC-thread local cache for remsets
+    pub remset_nptr: usize,
+    pub remset: Vec<* mut JlValue>,
 }
 
-impl GcMarkCache {
+
+/// to-be thread-local mark cache for GC threads. TODO: make this thread-local
+pub static mut mark_cache: Option<Mutex<MarkCache>> = None;
+
+/// Get _GC thread-local_ mark cache used for marking. This function
+/// does not provide access to Julia threads' mark caches. To access
+/// those mark caches, use the coressponding JlTLS object or Gc2
+/// object.
+pub fn gc_cache<'a>() -> MutexGuard<'a, MarkCache> {
+    unsafe { mark_cache.as_ref().unwrap() }.lock().unwrap()
+}
+
+/// to-be GC-thread-local big object list, we need to figure out thread IDs for objects put here somehow.
+pub static mut the_global_big_obj_list: Option<Mutex<Vec<&'static mut BigVal>>> = None;
+
+pub fn global_big_obj_list<'a>() -> MutexGuard<'a, Vec<&'static mut BigVal>> {
+    unsafe { the_global_big_obj_list.as_ref().unwrap() }.lock().unwrap()
+}
+
+impl MarkCache {
     pub fn new() -> Self {
-        GcMarkCache {
+        MarkCache {
             perm_scanned_bytes: 0,
             scanned_bytes: 0,
             nbig_obj: 0,
-            big_obj: [::std::ptr::null_mut(); 1024],
+            big_obj: [::std::ptr::null_mut(); BIG_OBJ_CACHE_SIZE],
+            remset_nptr: 0,
+            remset: Vec::new(),
         }
+    }
+
+    pub fn setmark_buf(&mut self, o: * mut JlValue, mark_mode: u8, minsz: usize) {
+        let buf = unsafe {
+            &mut *as_mut_jltaggedvalue(o)
+        };
+        let tag = buf.read_header();
+
+        if tag.marked() {
+            return;
+        }
+
+        let mut bits = 0;
+
+        if unsafe { intrinsics::likely(Marking::setmark_tag(buf, mark_mode, tag, &mut bits)) } && ! get_gc_verifying() {
+            if minsz <= GC_MAX_SZCLASS {
+                let maybe_meta = unsafe {
+                    pg_mgr().find_pagemeta(o)
+                };
+                match maybe_meta {
+                    Some(meta) => {
+                        // object belongs to a pool managed by page manager
+                        self.setmark_pool_(buf, bits, meta);
+                        return;
+                    }
+                    None => ()
+                }
+            }
+            // object doesn't belong to a pool
+            self.setmark_big(buf, bits);
+        }
+    }
+
+    // update metadata of the page the *marked* pool-allocated object lies in
+    fn setmark_pool_(&mut self, o: * mut JlTaggedValue, mark_mode: u8, meta: &mut PageMeta) {
+        if cfg!(memdebug) {
+            return self.setmark_big(o, mark_mode);
+        }
+
+        if mark_mode == GC_OLD_MARKED {
+            self.perm_scanned_bytes += meta.osize as usize;
+            meta.nold.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.scanned_bytes += meta.osize as usize;
+
+            if get_mark_reset_age() != 0 {
+                meta.has_young = 1;
+                unsafe {
+                    let page_begin = Page::of_raw(o).offset(GC_PAGE_OFFSET as isize);
+                    let obj_id = page_begin.offset_to(mem::transmute::<* mut JlTaggedValue, * const u8>(o)).unwrap() as usize / meta.osize as usize;
+                    // set age of the object in memory pool atomically
+                    meta.ages.as_mut().unwrap()[obj_id / 8].fetch_and(!(1 << (obj_id % 8)), Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    unsafe fn setmark_pool(&mut self, o: * mut JlTaggedValue, mark_mode: u8) {
+        let meta = pg_mgr().find_pagemeta(o).unwrap();
+        self.setmark_pool_(o, mark_mode, meta);
+    }
+
+    /// Update metadata of the *marked* big object. This method should
+    /// be called *only once* per object.
+    fn setmark_big(&mut self, o: * mut JlTaggedValue, mark_mode: u8) {
+        debug_assert!(unsafe { pg_mgr().find_pagemeta(o).is_none() }, "Tried to process marked pool-allocated object as marked big object");
+
+        let hdr = unsafe{
+            BigVal::from_mut_jltaggedvalue(&mut *o)
+        };
+
+        let nbytes = hdr.size(); // the size() method does untagging already
+
+        if mark_mode == GC_OLD_MARKED {
+            // object is old
+            self.perm_scanned_bytes += nbytes;
+            self.gc_queue_big_marked(hdr, false);
+        } else {
+            self.scanned_bytes += nbytes;
+            // object may be young, may be old. however, if object's
+            // age is 0 then it has to be young
+            if get_mark_reset_age() != 0 && hdr.age() != 0 {
+                // reset the age
+                hdr.set_age(0);
+                self.gc_queue_big_marked(hdr, true);
+            }
+        }
+
+        // TODO: objprofile_count(jl_typeof(jl_valueof(o)), mark_mode == GC_OLD_MARKED, nbytes)
+    }
+
+    #[inline(always)]
+    unsafe fn setmark(&mut self, o: * mut JlTaggedValue, mark_mode: u8, sz: usize) {
+        if sz <= GC_MAX_SZCLASS {
+            self.setmark_pool(o, mark_mode);
+        } else {
+            self.setmark_big(o, mark_mode);
+        }
+    }
+
+
+    #[inline(always)]
+    fn gc_queue_big_marked(&mut self, hdr: &mut BigVal, toyoung: bool) {
+        let nentry = BIG_OBJ_CACHE_SIZE;
+        let mut nobj = self.nbig_obj;
+
+        if unsafe { intrinsics::unlikely(nobj >= nentry) } {
+            self.sync_cache(&mut *global_big_obj_list(), -1);
+            nobj = 0;
+        }
+
+        if hdr.in_list == true {
+            return;
+        }
+
+        let v = if toyoung {
+            ((hdr as * mut BigVal as usize) | 1) as * mut BigVal
+        } else {
+            hdr as * mut BigVal
+        };
+
+        unsafe {
+            hdr.slot = nobj;
+        }
+
+        self.big_obj[nobj] = v;
+        self.nbig_obj = nobj + 1;
+    }
+
+    // TODO: make sure that access to local_obj_list is thread-safe
+    fn sync_cache(&mut self, local_obj_list: &mut Vec<&mut BigVal>, tid: i16) {
+        let nbig = self.nbig_obj;
+
+        for i in 0..nbig {
+            let ptr = self.big_obj[i].clone();
+            let hdr = unsafe {
+                &mut *((ptr as usize).clear_tag(1) as * mut BigVal)
+            };
+
+            Gc2::unlink_big_object(hdr);
+
+            if ((ptr as usize) & 1) != 0 {
+                hdr.slot = local_obj_list.len();
+                hdr.tid = tid;
+                hdr.in_list = true;
+                local_obj_list.push(hdr);
+            } else {
+                // move from `big_objects` to `big_objects_marked`
+                unsafe {
+                    // TODO: fix my attempt at making thread-safe
+                    let mut bo: MutexGuard<Vec<* mut BigVal>> = big_objects_marked.as_mut().unwrap().lock().unwrap();
+                    (*bo).push(hdr);
+                    hdr.in_list = true;
+                    hdr.slot = (*bo).len();
+                    hdr.tid = -1;
+                }
+            }
+        }
+
+        self.nbig_obj = 0;
+
+        unsafe {
+            perm_scanned_bytes += self.perm_scanned_bytes;
+            scanned_bytes += self.scanned_bytes;
+        }
+
+        self.perm_scanned_bytes = 0;
+        self.scanned_bytes = 0;
     }
 }
 
@@ -531,28 +725,649 @@ pub struct GcFrame {
     // actual roots appear here
 }
 
+/// Marking part of the garbage collector. Separation of this and the rest makes thread-safety easier to achieve.
+pub struct Marking {
+    // mark stack for marking on this thread
+    mark_stack: ConcurrentStack<* mut JlValue>,
+}
+
+impl Marking {
+    pub fn new() -> Self {
+        Marking {
+            mark_stack: ConcurrentStack::new(),
+        }
+    }
+
+    pub fn mark_roots(&mut self) {
+        // modules
+        self.push_root(unsafe { (*jl_main_module).as_mut_jlvalue() }, 0);
+        self.push_root(unsafe { (*jl_internal_main_module).as_mut_jlvalue() }, 0);
+
+        // invisible builtin values
+        if ! jl_an_empty_vec_any.is_null() {
+            self.push_root(jl_an_empty_vec_any, 0);
+        }
+        if ! jl_module_init_order.is_null() {
+            self.push_root(unsafe { (*jl_module_init_order).as_mut_jlvalue() }, 0);
+        }
+        let f = unsafe { jl_cfunction_list.unknown };
+        self.push_root(f, 0);
+        self.push_root(unsafe { (*jl_anytuple_type_type).as_mut_jlvalue() }, 0);
+        self.push_root(jl_ANY_flag, 0);
+
+        for i in 0..N_CALL_CACHE {
+            if ! call_cache[i].is_null() {
+                self.push_root(call_cache[i], 0);
+            }
+        }
+
+        if ! jl_all_methods.is_null() {
+            self.push_root(unsafe { (*jl_all_methods).as_mut_jlvalue() }, 0);
+        }
+
+        // constants
+        self.push_root(unsafe { (*jl_typetype_type).as_mut_jlvalue() }, 0);
+        self.push_root(unsafe { (*jl_emptytuple_type).as_mut_jlvalue() }, 0);
+    }
+
+    pub fn walk_roots(&mut self) {
+        debug_assert!(self.mark_stack.is_empty());
+
+        // finished premark, mark remsets and thread local roots
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * t.tl_gcs };
+            self.mark_remset(tl_gc); // TODO: make this just tl_gc to separate marking even better
+            self.mark_thread_local(tl_gc); // TODO: separate these from self
+        }
+
+        // walk the roots
+        self.mark_roots();
+        self.visit_mark_stack(); // this function processes all the pushed roots
+    }
+
+    pub fn mark_finalizers(&mut self, orig_marked_len: usize) {
+        // mark remaining finalizers
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * t.tl_gcs };
+            // this is self, not t!
+            self.mark_object_list(&mut t.finalizers, 0);
+        }
+
+        unsafe {
+            // check only the remainder of finalizer_list_marked
+            self.mark_object_list(&mut finalizer_list_marked, orig_marked_len);
+        }
+
+        // visit mark stack once before resetting mark_reset_age (in case of extra markings happened during finalizers?)
+        self.visit_mark_stack();
+        set_mark_reset_age(1);
+
+        // reset the age and old bit for any unmarked objects
+        // referenced by to_finalize list. Note that these objects
+        // can't be accessed outside `to_finalize` since they are
+        // still unmarked.
+        self.mark_object_list(unsafe { &mut to_finalize }, 0);
+        self.visit_mark_stack();
+
+        set_mark_reset_age(0);
+    }
+
+    fn push_root(&mut self, e: *mut JlValue, d: i32) -> i32 {
+        // N.B. Julia has `gc_findval` to interact with GDB for finding the gc-root for a value.
+        // We should implement something similar for simpler debugging
+
+        debug_assert!(! e.is_null());
+
+        let o = unsafe { &mut *as_mut_jltaggedvalue(e) };
+        // TODO: verify_val(v);
+        let tag = o.read_header();
+        if ! tag.marked() {
+            let mut bits: u8 = 0;
+            if unsafe { intrinsics::likely(Marking::setmark_tag(o, GC_MARKED, tag, &mut bits)) } {
+                let tag = tag & !0xf;
+                if ! get_gc_verifying() {
+                    self.mark_obj(e, tag, bits);
+                }
+                self.scan_obj(&e, d, tag, bits);
+            }
+            return (! (bits as usize).old()) as i32;
+        }
+        return (! tag.old()) as i32;
+    }
+
+    #[inline(always)]
+    fn push_root_if_not_null<T: JlValueLike>(&mut self, p: * mut T, d: i32) {
+        if ! p.is_null() {
+            self.push_root(unsafe { (* p).as_mut_jlvalue() }, d);
+        }
+    }
+
+    #[inline(always)]
+    fn scan_obj3(&mut self, v: &* mut JlValue, d: i32, tag: usize) {
+        self.scan_obj(v, d, tag & !15, (tag & 0xf) as u8);
+    }
+
+    // Julia's gc marks the object and recursively marks its children, queueing objecs
+    // on mark stack when recursion depth is too great.
+    fn scan_obj(&mut self, v: &*mut JlValue, _d: i32, tag: libc::uintptr_t, bits: u8) {
+        let vt: *const JlDatatype = tag as *mut JlDatatype;
+        let mut nptr = 0;
+        let mut refyoung = 0;
+
+        debug_assert!(! v.is_null());
+        debug_assert_ne!(bits & GC_MARKED, 0);
+        debug_assert_ne!(vt, jl_symbol_type); // should've checked in `gc_mark_obj`
+
+        if vt == jl_weakref_type {
+            return // don't mark weakrefs
+        }
+
+        if unsafe { (*(*vt).layout).npointers() == 0 } {
+            return; // fast path for pointerless types
+        }
+
+        let d = _d + 1;
+        if d >= MAX_MARK_DEPTH {
+            // queue the root
+            self.mark_stack.push(*v);
+            return;
+        }
+
+        if vt == jl_simplevector_type {
+            let vec = *v as *const JlSVec;
+            let data = unsafe { np_jl_svec_data(*v) };
+            let l = unsafe { (*vec).length };
+            nptr += 1;
+            let elements: &mut[* mut JlValue] = unsafe { slice::from_raw_parts_mut(data, l as usize) };
+            let mut i = 0;
+            for e in elements {
+                if ! (*e).is_null() {
+                    verify_parent!("svec", *v, e, format!("elem({})", i));
+                    refyoung |= self.push_root(*e, d);
+                }
+                i += 1;
+            }
+        } else if unsafe { (*vt).name == jl_array_typename } {
+            let a = unsafe {
+                JlArray::from_jlvalue_mut(&mut **v)
+            };
+            let flags = a.flags.clone();
+            if flags.how() == AllocStyle::HasOwnerPointer {
+                let owner = a.data_owner_mut();
+                refyoung |= self.push_root(owner, d);
+            } else if flags.how() == AllocStyle::JlBuffer {
+                let buf_ptr = unsafe {
+                    mem::transmute::<* mut u8, * mut JlValue>((a.data as * mut u8).offset(- (a.offset as isize * a.elsize as isize)))
+                };
+                let val_buf = unsafe {
+                    as_mut_jltaggedvalue(buf_ptr)
+                };
+                verify_parent!("array", *v, unsafe { mem::transmute(&val_buf) }, "buffer ('loc' addr is meaningless)");
+                // N.B. In C there is the statement `(void)val_buf` here for some reason.
+                gc_cache().setmark_buf(buf_ptr, bits, a.nbytes());
+            }
+
+            if flags.ptrarray() && ! a.data.is_null() {
+                let l = a.length as usize;
+
+                if l > 100000 && d > MAX_MARK_DEPTH - 10 {
+                    // don't mark long arrays at hight depth to avoid copying
+                    // the whole array into the mark queue, instead queue the
+                    // array pointer.
+                    self.mark_stack.push(*v);
+                    return;
+                } else {
+                    nptr += l;
+                    let data = unsafe {
+                        slice::from_raw_parts(a.data as * const * mut JlValue, l)
+                    };
+
+                    // queue elements for marking
+                    for i in 0..l {
+                        let elt = data[i];
+                        if ! elt.is_null() {
+                            // N.B. I'm not sure about the &elt part
+                            verify_parent!("array", *v, &elt, format!("elem({})", i));
+                            refyoung |= self.push_root(elt, d);
+                        }
+                    }
+                }
+            }
+        } else if vt == jl_module_type {
+            // should increase nptr here, according to Julia's GC implementation
+            refyoung |= self.mark_module(JlModule::from_jlvalue_mut(unsafe { &mut **v }), d, bits);
+        } else if vt == jl_task_type {
+            // same nptr increment thing
+            self.gc_mark_task(JlTask::from_jlvalue_mut(unsafe { &mut **v }), d, bits);
+            // tasks should always be remarked since Julia doesn't trigger the
+            // write barrier for stores to stack slots, it does so only for
+            // values on heap
+            refyoung = 1;
+        } else {
+            let layout = unsafe {
+                &*(*vt).layout
+            };
+            let nf = layout.nfields;
+            let npointers = layout.npointers();
+            nptr += ((npointers & 0xff) as usize) << (npointers & 0x300);
+
+            for i in 0..nf {
+                if unsafe { np_jl_field_isptr(vt, i as i32) != 0 } {
+                    let slot = unsafe {
+                        &*((*v as * mut u8).offset(np_jl_field_offset(vt, i as i32) as isize) as * mut * mut JlValue)
+                    };
+                    let fld = unsafe { *slot };
+                    if ! fld.is_null() {
+                        verify_parent!("object", *v, slot, format!("field({})", i));
+                        refyoung |= self.push_root(fld, d);
+                    }
+                }
+            }
+        }
+
+        // label 'ret:
+        if bits == GC_OLD_MARKED && refyoung > 0 && ! get_gc_verifying() {
+            // use marking thread's remset rather than Julia thread's remset for fast thread-safety
+            // for now, these remsets are in gc_cache()
+            gc_cache().remset_nptr += nptr;
+            gc_cache().remset.push(*v);
+        }
+    }
+
+    /// Update metadata of a marked object without scanning it
+    fn mark_obj(&mut self, v: * mut JlValue, tag: usize, bits: u8) {
+        debug_assert!(! v.is_null());
+        debug_assert!((bits as usize).marked());
+
+        let o: * mut JlTaggedValue = as_mut_jltaggedvalue(v);
+        let vtref = tag.type_tag() as * const JlDatatype;
+        let vt = unsafe { &mut * (vtref as * mut JlDatatype) };
+
+        Marking::assert_datatype(vt);
+
+        debug_assert!(vtref != jl_symbol_type);
+
+        if vtref == jl_simplevector_type {
+            let vec = v as * const JlSVec;
+            let l = unsafe { (*vec).length };
+
+            unsafe {
+                gc_cache().setmark(o, bits, l * mem::size_of::<* const libc::c_void>() + mem::size_of::<JlSVec>());
+            }
+
+        } else if vt.name == jl_array_typename {
+            let a = unsafe { &*(v as * const JlArray) };
+            let ref flags = a.flags;
+
+            if flags.pooled() {
+                unsafe {
+                    gc_cache().setmark_pool(o, bits);
+                }
+            } else {
+                gc_cache().setmark_big(o, bits);
+            }
+
+            if flags.how() == AllocStyle::MallocBuffer {
+                // array is malloc'd
+
+                // In C:
+                // objprofile_count(jl_malloc_tag, bits == GC_OLD_MARKED, a.nbytes())
+
+                if bits == GC_OLD_MARKED {
+                    gc_cache().perm_scanned_bytes += a.nbytes();
+                } else {
+                    gc_cache().scanned_bytes += a.nbytes();
+                }
+            }
+        } else if vtref == jl_module_type {
+            unsafe {
+                gc_cache().setmark(o, bits, mem::size_of::<JlModule>());
+            }
+        } else if vtref == jl_task_type {
+            unsafe {
+                gc_cache().setmark(o, bits, mem::size_of::<JlTask>());
+            }
+        } else if vtref == jl_string_type {
+            unsafe {
+                // length of the string
+                let len = *(v as * const usize);
+                gc_cache().setmark(o, bits, len + mem::size_of::<usize>() + 1);
+            }
+        } else {
+            unsafe {
+                gc_cache().setmark(o, bits, vt.size as usize);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn assert_datatype(vt: * mut JlDatatype) {
+        if cfg!(debug_assertions) {
+            unsafe {
+                if intrinsics::unlikely(jl_typeof((*vt).as_jlvalue()) != jl_datatype_type) {
+                    np_corruption_fail(vt);
+                }
+            }
+        }
+    }
+
+    fn setmark_tag(o: &mut JlTaggedValue, mark_mode: u8, tag: usize, bits: &mut u8) -> bool {
+        debug_assert!(! tag.marked());
+        debug_assert!((mark_mode as usize).marked(), format!("Found mark_mode {} rather than a marked one", mark_mode));
+
+        let (tag, mark_mode) = if get_mark_reset_age() != 0 {
+            // reset the object's age to young, as if it is just allocated
+            let mut t = tag.clone();
+            t.set_tag(GC_MARKED);
+            (t, GC_MARKED)
+        } else {
+            let mark_mode = if tag.old() {
+                GC_OLD_MARKED
+            } else {
+                mark_mode
+            };
+            (tag | mark_mode as usize, mark_mode)
+        };
+
+        debug_assert!(tag & 0x3 == mark_mode as usize, format!("tag has mark bits {} but mark mode is {}", tag & 0x3, mark_mode));
+
+        *bits = mark_mode;
+        let old_tag = o.header.swap(tag, Ordering::Relaxed);
+        // TODO: verify_val(jl_valueof(o)) !!!
+        ! old_tag.marked()
+    }
+
+    fn mark_remset(&mut self, other: &mut Gc2) {
+        for i in 0..other.heap.last_remset.len() {
+            // cannot borrow array item because non-lexical borrowing hasn't landed to Rust yet
+            let item = other.heap.last_remset[i].clone();
+            let tag = unsafe { &*as_jltaggedvalue(item) };
+            self.scan_obj3(&item, 0, tag.read_header());
+        }
+
+        let mut n_bnd_refyoung = 0;
+
+        for i in 0..other.heap.rem_bindings.len() {
+            if other.heap.rem_bindings[i].value.is_null() {
+                continue;
+            }
+
+            let is_young = self.push_root(other.heap.rem_bindings[i].value, 0) != 0; // for lexical borrow
+
+            if is_young {
+                // reusing processed indices
+                other.heap.rem_bindings.swap(i, n_bnd_refyoung);
+                n_bnd_refyoung += 1;
+            }
+        }
+
+        other.heap.rem_bindings.truncate(n_bnd_refyoung);
+    }
+
+    /// Visit all objects queued to the mark stack
+    pub fn visit_mark_stack(&mut self) {
+        let thread_pool = unsafe {
+            np_threads.as_mut().unwrap()
+        };
+
+        // Channel to synchronize when the worker threads are finished
+        let (tx, rx) = mpsc::channel();
+        let mut n_jobs = 0;
+
+        if ! self.mark_stack.is_empty() {
+            let l = self.mark_stack.len();
+            mark_stack_sum.fetch_add(l, Ordering::Relaxed);
+            mark_stack_num.fetch_add(1, Ordering::Relaxed);
+            mark_stack_max.store(cmp::max(mark_stack_max.load(Ordering::SeqCst), l), Ordering::SeqCst);
+            mark_stack_min.store(cmp::min(mark_stack_min.load(Ordering::SeqCst), l), Ordering::SeqCst);
+        }
+        while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
+            // casting to let Rust send this pointer over threads
+            let v = self.mark_stack.pop().unwrap() as usize;
+            let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
+            debug_assert_ne!(header, 0);
+            let tx = tx.clone();
+            self.scan_obj3(&(v as * mut JlValue), 0, header);
+            thread_pool.execute(move || {
+                // signal that this job is done
+                tx.send(());
+            });
+
+            n_jobs += 1;
+        }
+        // synchronize with the worker threads
+        rx.iter().take(n_jobs).fold((), |x, y| {});
+        debug_assert!(self.mark_stack.is_empty());
+    }
+
+
+    #[inline(always)]
+    unsafe fn read_rt_stack<T>(addr: * mut T, offset: usize, lb: usize, ub: usize) -> usize {
+        let a = addr as usize;
+        // correct address if it is within bounds
+        let real_addr = if a >= lb && a < ub {
+            a + offset
+        } else {
+            a
+        };
+        *mem::transmute::<usize, * const usize>(real_addr)
+    }
+
+    fn mark_rt_stack(&mut self, sinit: * mut GcFrame, offset: usize, lb: usize, ub: usize, d: i32) {
+        // leave all hope, ye who enter here
+        // for that there is no more safety guarantees and only memory transmutation
+
+        let mut s = sinit;
+
+        while ! s.is_null() {
+            let nroots = unsafe {
+                Marking::read_rt_stack(&mut (&mut *s).nroots, offset, lb, ub)
+            };
+            let nr = nroots >> 1;
+            let rts = unsafe {
+                slice::from_raw_parts_mut((s as * mut * mut libc::c_void).offset(2) as * mut * mut * mut JlValue, nr)
+            };
+
+            if nroots & 1 != 0 {
+                // stack is indirected
+                for i in 0..nr {
+                    unsafe {
+                        // read stack slot
+                        let slot: * mut * mut libc::c_void = mem::transmute(Marking::read_rt_stack(&mut rts[i], offset, lb, ub));
+                        // read object itself
+                        let obj: * mut libc::c_void = mem::transmute(Marking::read_rt_stack(slot, offset, lb, ub));
+
+                        if ! obj.is_null() {
+                            self.push_root(obj, d);
+                        }
+                    }
+                }
+            } else {
+                // stack has no indirection
+                for i in 0..nr {
+                    // read object
+                    let obj: * mut libc::c_void = unsafe {
+                        mem::transmute(Marking::read_rt_stack(&mut rts[i], offset, lb, ub))
+                    };
+                    if ! obj.is_null() {
+                        self.push_root(obj, d);
+                    }
+                }
+            }
+
+            unsafe {
+                s = mem::transmute(Marking::read_rt_stack(&mut (*s).prev, offset, lb, ub));
+            }
+        }
+    }
+
+    pub fn mark_thread_local(&mut self, other: &mut Gc2) {
+        let ref tls = other.tls;
+        let m = tls.current_module.clone();
+        let ct = tls.current_task.clone();
+        let rt = tls.root_task.clone();
+        let exn = tls.exception_in_transit.clone();
+        let ta = tls.task_arg_in_transit.clone();
+
+        self.push_root_if_not_null(m, 0);
+        self.push_root_if_not_null(ct, 0);
+        self.push_root_if_not_null(rt, 0);
+        self.push_root_if_not_null(exn, 0);
+        self.push_root_if_not_null(ta, 0);
+    }
+
+    fn mark_module(&mut self, m: &mut JlModule, d: i32, bits: u8) -> i32 {
+        let mut refyoung = 0;
+        let mut table = unsafe {
+            slice::from_raw_parts_mut(m.bindings.table, m.bindings.size)
+        };
+
+        let mut i = 1;
+
+        while i < m.bindings.size {
+            if ! HTable::is_not_found(table[i]) {
+                let b = unsafe {
+                    JlBinding::from_jlvalue_mut(&mut *table[i])
+                };
+                gc_cache().setmark_buf(b.as_mut_jlvalue(), bits, mem::size_of::<JlBinding>());
+                let vb = as_mut_jltaggedvalue(b.as_mut_jlvalue());
+                verify_parent!("module", m.as_jlvalue(), &unsafe { mem::transmute(vb) }, "binding_buff");
+
+                if ! b.value.is_null() {
+                    verify_parent!("module", m.as_jlvalue(), &b.value, format!("binding({})", CStr::from_ptr(np_jl_symbol_name(b.name)).to_str().unwrap()));
+                    refyoung |= self.push_root(b.value, d);
+                }
+
+                if ! b.globalref.is_null() {
+                    refyoung |= self.push_root(b.globalref, d);
+                }
+            }
+
+            i += 2;
+        }
+
+        for using in m.usings.as_slice_mut() {
+            refyoung |= self.push_root(*using, d);
+        }
+
+        if ! m.parent.is_null() {
+            refyoung |= self.push_root(unsafe { (&mut *m.parent).as_mut_jlvalue() }, d);
+        }
+
+        refyoung
+    }
+
+    fn gc_mark_task(&mut self, ta: &mut JlTask, d: i32, bits: u8) {
+        if ! ta.parent.is_null() {
+            self.push_root(unsafe { (&mut *ta.parent).as_mut_jlvalue() }, d);
+        }
+
+        self.push_root(ta.tls, d);
+        self.push_root(ta.consumers, d);
+        self.push_root(ta.donenotify, d);
+        self.push_root(ta.exception, d);
+
+        if ! ta.backtrace.is_null() {
+            self.push_root(ta.backtrace, d);
+        }
+
+        if ! ta.start.is_null() {
+            self.push_root(ta.start, d);
+        }
+
+        if ! ta.result.is_null() {
+            self.push_root(ta.result, d);
+        }
+
+        self.gc_mark_task_stack(ta, d, bits);
+    }
+
+    fn gc_mark_task_stack(&mut self, ta: &mut JlTask, d: i32, bits: u8) {
+        unsafe {
+            // TODO: make this thread-safe
+            gc_scrub_record_task(ta);
+        }
+
+        let stkbuf = ta.stkbuf != usize::max_value() as * mut libc::c_void && ! ta.stkbuf.is_null();
+        let tid = ta.tid;
+        let ptls2 = unsafe {
+            &mut get_all_tls()[tid as usize]
+        };
+
+        if stkbuf {
+            if cfg!(copy_stacks) {
+                gc_cache().setmark_buf(ta.stkbuf, bits, ta.bufsz);
+            } else {
+                if ta as * mut JlTask != ptls2.root_task {
+                    // TODO: give it to the corresponding thread?
+                    gc_cache().setmark_buf(ta.stkbuf, bits, ta.ssize);
+                }
+            }
+        }
+
+        if ta as * mut JlTask == ptls2.current_task {
+            // TODO: give it to the corresponding thread?
+            self.mark_rt_stack(&mut *ptls2.pgcstack, 0, 0, usize::max_value(), d);
+        } else if stkbuf {
+            let (offset, lb, ub) = if cfg!(copy_stacks) {
+                let ub = ptls2.stackbase as usize;
+                let lb = ub - ta.ssize;
+                (ta.stkbuf as usize - lb, lb, ub)
+            } else {
+                (0, 0, usize::max_value())
+            };
+            // TODO: give it to the corresponding thread?
+            self.mark_rt_stack(ta.gcstack, offset, lb, ub, d);
+        }
+    }
+
+    fn mark_object_list(&mut self, list: * mut JlArrayList, start: usize) {
+        let l = unsafe { &mut *list };
+        let len = l.len;
+        let items = l.as_slice_mut();
+        let mut i = start;
+
+        while i < len {
+            let mut v = items[i];
+            if unsafe { intrinsics::unlikely(v.is_null()) } {
+                i += 1;
+                continue;
+            }
+
+            let vp = v as usize;
+
+            if (vp & 1) != 0 {
+                v = vp.clear_tag(1) as * mut libc::c_void;
+                i += 1;
+                debug_assert!(i < len);
+            }
+
+            self.push_root(v, 0);
+
+            i += 1;
+        }
+    }
+}
+
 // Thread-local GC data
 // Lifetimes here don't have a meaning, yet
 pub struct Gc2<'a> {
-    // heap for current thread
+    /// heap for the current _Julia_ thread
     pub heap: ThreadHeap<'a>,
-    // handle for page manager
-    pg_mgr: &'a mut PageMgr,
-    // mark cache for thread-local marks
-    cache: GcMarkCache,
+    /// mark cache for thread-local marks
+    pub cache: MarkCache,
     // Age of the world, used for promotion
     world_age: usize,
-    in_finalizer: bool,
-    disable_gc: bool,
     // parent pointer to thread-local storage for other fields
     // we can access stack base etc. from here
-    tls: &'static mut JlTLS,
-    // mark stack for marking on this thread
-    mark_stack: Vec<* mut JlValue>,
+    tls: &'static mut JlTLS, // we are lying to Rust right now, we will use this in an unsafe manner
+    tid: i16, // ID of the owning thread
+    // Data structure for marking part of the GC
+    pub marking: Marking
 }
 
 impl<'a> Gc2<'a> {
-    pub fn new(tls: &'static mut JlTLS, pg_mgr: &'a mut PageMgr) -> Self {
+    pub fn new(tls: &'static mut JlTLS) -> Self {
 
         // create thread pool for parallelizing marking and sweeping
         let num_threads = match ::std::env::var("NEPTUNE_THREADS").map_err(GcInitError::Env).and_then(|nthreads| {
@@ -567,13 +1382,11 @@ impl<'a> Gc2<'a> {
 
        Gc2 {
            heap: ThreadHeap::new(),
-           pg_mgr: pg_mgr,
-           cache: GcMarkCache::new(),
+           cache: MarkCache::new(),
            world_age: 0,
-           in_finalizer: false,
-           disable_gc: false,
+           tid: tls.tid,
            tls: tls,
-           mark_stack: Vec::new(),
+           marking: Marking::new(),
         }
     }
 
@@ -643,12 +1456,13 @@ impl<'a> Gc2<'a> {
                 if let Some(v) = self.heap.pools[pool_index].freelist.pop() {
                     let pool = &self.heap.pools[pool_index];
                     let meta = unsafe {
-                        self.pg_mgr.find_pagemeta(v).unwrap()
+                        pg_mgr().find_pagemeta(v).unwrap()
                     };
                     // just a sanity check:
                     debug_assert_eq!(meta.osize as usize, pool.osize);
                     meta.has_young = 1; // TODO: make this field a bool
-
+                    meta.nfree -= 1;
+                    /*
                     if let Some(next) = pool.freelist.last() {
                         unsafe { // this unsafe is here because `unlikely` is marked unsafe in Rust
                             if intrinsics::unlikely(Page::of(v) != Page::of(next)) {
@@ -656,10 +1470,20 @@ impl<'a> Gc2<'a> {
                             }
                         }
                     }
+                    */
                     v
                 } else {
                     self.add_page(pool_index);
-                    self.heap.pools[pool_index].freelist.pop().unwrap()
+                    let ref mut pool = self.heap.pools[pool_index];
+                    let v = pool.freelist.pop().unwrap();
+                    let meta = unsafe {
+                        pg_mgr().find_pagemeta(v).unwrap()
+                    };
+                    // just a sanity check:
+                    debug_assert_eq!(meta.osize as usize, pool.osize);
+                    meta.has_young = 1; // TODO: make this field a bool
+                    meta.nfree -= 1;
+                    v
                 }
             },
             None => {
@@ -676,7 +1500,7 @@ impl<'a> Gc2<'a> {
         let regions = unsafe {
             REGIONS.as_mut().unwrap()
         };
-        let page = self.pg_mgr.alloc_page(regions);
+        let page = pg_mgr().alloc_page(regions);
         let region = unsafe {
             neptune_find_region(page).unwrap()
         };
@@ -686,7 +1510,7 @@ impl<'a> Gc2<'a> {
         // set up page meta
         let pool = &mut self.heap.pools[poolIndex];
         meta.osize = pool.osize as u16;
-        meta.thread_n = self.tls.tid as u16;
+        meta.thread_n = self.tid as u16;
         /* TODO: enable later on!
         meta.data = Some(&mut page.data);
          */
@@ -737,7 +1561,7 @@ impl<'a> Gc2<'a> {
 
         let (bv, tv) = unsafe {
             let ptr = self.rust_alloc::<BigVal>(allocsz);
-            (*ptr).tid = self.tls.tid;
+            (*ptr).tid = self.tid;
             (*ptr).in_list = true;
             (*ptr).slot = self.heap.big_objects.len();
             (*ptr).sz_or_age = size;
@@ -792,24 +1616,14 @@ impl<'a> Gc2<'a> {
             }
         }
 
-        debug_assert!(self.mark_stack.is_empty());
-
         // 1. fix GC bits of objects in the memset (a.k.a. premark)
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             tl_gc.premark();
         }
 
-        // finished premark, mark remsets and thread local roots
-        for t in unsafe { get_all_tls() } {
-            let tl_gc = unsafe { &mut * t.tl_gcs };
-            self.mark_remset(tl_gc); // TODO: make this just tl_gc to separate marking even better
-            self.mark_thread_local(tl_gc); // TODO: separate these from self
-        }
-
         // walk the roots
-        self.mark_roots();
-        self.visit_mark_stack(); // this function processes all the pushed roots
+        self.marking.walk_roots();
 
         unsafe {
             // this is deliberately not thread-safe
@@ -839,39 +1653,19 @@ impl<'a> Gc2<'a> {
             orig_marked_len = 0;
         }
 
-        // mark remaining finalizers
-        for t in unsafe { get_all_tls() } {
-            let tl_gc = unsafe { &mut * t.tl_gcs };
-            // this is self, not t!
-            self.mark_object_list(&mut t.finalizers, 0);
-        }
+        // mark finalizers
+        self.marking.mark_finalizers(orig_marked_len);
 
-        unsafe {
-            // check only the remainder of finalizer_list_marked
-            self.mark_object_list(&mut finalizer_list_marked, orig_marked_len);
-        }
-
-        // visit mark stack once before resetting mark_reset_age (in case of extra markings happened during finalizers?)
-        self.visit_mark_stack();
-        set_mark_reset_age(1);
-
-        // reset the age and old bit for any unmarked objects
-        // referenced by to_finalize list. Note that these objects
-        // can't be accessed outside `to_finalize` since they are
-        // still unmarked.
-        self.mark_object_list(unsafe { &mut to_finalize }, 0);
-        self.visit_mark_stack();
-
-        set_mark_reset_age(0);
         neptune_gc_settime_postmark_end();
 
         Gc2::verify_to_finalize();
 
         // flush everything in mark caches
+        // TODO: revisit this part
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             // this is self, not tl_gc!
-            self.sync_cache_nolock(&mut tl_gc.cache);
+            tl_gc.cache.sync_cache(&mut self.heap.big_objects, self.tid);
         }
 
 
@@ -979,73 +1773,6 @@ impl<'a> Gc2<'a> {
         };
     }
 
-    fn sync_cache_nolock(&mut self, cache: &mut GcMarkCache) {
-        let nbig = cache.nbig_obj;
-
-        for i in 0..nbig {
-            let ptr = cache.big_obj[i].clone();
-            let hdr = unsafe {
-                &mut *((ptr as usize).clear_tag(1) as * mut BigVal)
-            };
-
-            Gc2::unlink_big_object(hdr);
-
-            if ((ptr as usize) & 1) != 0 {
-                hdr.slot = self.heap.big_objects.len();
-                hdr.tid = self.tls.tid;
-                hdr.in_list = true;
-                self.heap.big_objects.push(hdr);
-            } else {
-                // move from `big_objects` to `big_objects_marked`
-                unsafe {
-                    // TODO: fix my attempt at making thread-safe
-                    let mut bo: MutexGuard<Vec<* mut BigVal>> = big_objects_marked.as_mut().unwrap().lock().unwrap();
-                    (*bo).push(hdr);
-                    hdr.in_list = true;
-                    hdr.slot = (*bo).len();
-                    hdr.tid = -1;
-                }
-            }
-        }
-
-        cache.nbig_obj = 0;
-
-        unsafe {
-            perm_scanned_bytes += cache.perm_scanned_bytes;
-            scanned_bytes += cache.scanned_bytes;
-        }
-
-        cache.perm_scanned_bytes = 0;
-        cache.scanned_bytes = 0;
-    }
-
-    fn mark_object_list(&mut self, list: * mut JlArrayList, start: usize) {
-        let l = unsafe { &mut *list };
-        let len = l.len;
-        let items = l.as_slice_mut();
-        let mut i = start;
-
-        while i < len {
-            let mut v = items[i];
-            if unsafe { intrinsics::unlikely(v.is_null()) } {
-                i += 1;
-                continue;
-            }
-
-            let vp = v as usize;
-
-            if (vp & 1) != 0 {
-                v = vp.clear_tag(1) as * mut libc::c_void;
-                i += 1;
-                debug_assert!(i < len);
-            }
-
-            self.push_root(v, 0);
-
-            i += 1;
-        }
-    }
-
     fn verify(&mut self) {
         // TODO: implement
     }
@@ -1108,547 +1835,6 @@ impl<'a> Gc2<'a> {
         self.heap.remset_nptr = 0;
     }
 
-    fn mark_remset(&mut self, other: &mut Gc2) {
-        for i in 0..other.heap.last_remset.len() {
-            // cannot borrow array item because non-lexical borrowing hasn't landed to Rust yet
-            let item = other.heap.last_remset[i].clone();
-            let tag = unsafe { &*as_jltaggedvalue(item) };
-            self.scan_obj3(&item, 0, tag.read_header());
-        }
-
-        let mut n_bnd_refyoung = 0;
-
-        for i in 0..other.heap.rem_bindings.len() {
-            if other.heap.rem_bindings[i].value.is_null() {
-                continue;
-            }
-
-            let is_young = self.push_root(other.heap.rem_bindings[i].value, 0) != 0; // for lexical borrow
-
-            if is_young {
-                // reusing processed indices
-                other.heap.rem_bindings.swap(i, n_bnd_refyoung);
-                n_bnd_refyoung += 1;
-            }
-        }
-
-        other.heap.rem_bindings.truncate(n_bnd_refyoung);
-    }
-
-    // Julia's gc marks the object and recursively marks its children, queueing objecs
-    // on mark stack when recursion depth is too great.
-    fn scan_obj(&mut self, v: &*mut JlValue, _d: i32, tag: libc::uintptr_t, bits: u8) {
-        let vt: *const JlDatatype = tag as *mut JlDatatype;
-        let mut nptr = 0;
-        let mut refyoung = 0;
-
-        debug_assert!(! v.is_null());
-        debug_assert_ne!(bits & GC_MARKED, 0);
-        debug_assert_ne!(vt, jl_symbol_type); // should've checked in `gc_mark_obj`
-
-        if vt == jl_weakref_type {
-            return // don't mark weakrefs
-        }
-
-        if unsafe { (*(*vt).layout).npointers() == 0 } {
-            return; // fast path for pointerless types
-        }
-
-        let d = _d + 1;
-        if d >= MAX_MARK_DEPTH {
-            // queue the root
-            self.mark_stack.push(*v);
-            return;
-        }
-
-        if vt == jl_simplevector_type {
-            let vec = *v as *const JlSVec;
-            let data = unsafe { np_jl_svec_data(*v) };
-            let l = unsafe { (*vec).length };
-            nptr += 1;
-            let elements: &mut[* mut JlValue] = unsafe { slice::from_raw_parts_mut(data, l as usize) };
-            let mut i = 0;
-            for e in elements {
-                if ! (*e).is_null() {
-                    verify_parent!("svec", *v, e, format!("elem({})", i));
-                    refyoung |= self.push_root(*e, d);
-                }
-                i += 1;
-            }
-        } else if unsafe { (*vt).name == jl_array_typename } {
-            let a = unsafe {
-                JlArray::from_jlvalue_mut(&mut **v)
-            };
-            let flags = a.flags.clone();
-            if flags.how() == AllocStyle::HasOwnerPointer {
-                let owner = a.data_owner_mut();
-                refyoung |= self.push_root(owner, d);
-            } else if flags.how() == AllocStyle::JlBuffer {
-                let buf_ptr = unsafe {
-                    mem::transmute::<* mut u8, * mut JlValue>((a.data as * mut u8).offset(- (a.offset as isize * a.elsize as isize)))
-                };
-                let val_buf = unsafe {
-                    as_mut_jltaggedvalue(buf_ptr)
-                };
-                verify_parent!("array", *v, unsafe { mem::transmute(&val_buf) }, "buffer ('loc' addr is meaningless)");
-                // N.B. In C there is the statement `(void)val_buf` here for some reason.
-                self.setmark_buf(buf_ptr, bits, a.nbytes());
-            }
-
-            if flags.ptrarray() && ! a.data.is_null() {
-                let l = a.length as usize;
-
-                if l > 100000 && d > MAX_MARK_DEPTH - 10 {
-                    // don't mark long arrays at hight depth to avoid copying
-                    // the whole array into the mark queue, instead queue the
-                    // array pointer.
-                    self.mark_stack.push(*v);
-                    return;
-                } else {
-                    nptr += l;
-                    let data = unsafe {
-                        slice::from_raw_parts(a.data as * const * mut JlValue, l)
-                    };
-
-                    // queue elements for marking
-                    for i in 0..l {
-                        let elt = data[i];
-                        if ! elt.is_null() {
-                            // N.B. I'm not sure about the &elt part
-                            verify_parent!("array", *v, &elt, format!("elem({})", i));
-                            refyoung |= self.push_root(elt, d);
-                        }
-                    }
-                }
-            }
-        } else if vt == jl_module_type {
-            // should increase nptr here, according to Julia's GC implementation
-            refyoung |= self.mark_module(JlModule::from_jlvalue_mut(unsafe { &mut **v }), d, bits);
-        } else if vt == jl_task_type {
-            // same nptr increment thing
-            self.gc_mark_task(JlTask::from_jlvalue_mut(unsafe { &mut **v }), d, bits);
-            // tasks should always be remarked since Julia doesn't trigger the
-            // write barrier for stores to stack slots, it does so only for
-            // values on heap
-            refyoung = 1;
-        } else {
-            let layout = unsafe {
-                &*(*vt).layout
-            };
-            let nf = layout.nfields;
-            let npointers = layout.npointers();
-            nptr += ((npointers & 0xff) as usize) << (npointers & 0x300);
-
-            for i in 0..nf {
-                if unsafe { np_jl_field_isptr(vt, i as i32) != 0 } {
-                    let slot = unsafe {
-                        &*((*v as * mut u8).offset(np_jl_field_offset(vt, i as i32) as isize) as * mut * mut JlValue)
-                    };
-                    let fld = unsafe { *slot };
-                    if ! fld.is_null() {
-                        verify_parent!("object", *v, slot, format!("field({})", i));
-                        refyoung |= self.push_root(fld, d);
-                    }
-                }
-            }
-        }
-
-        // label 'ret:
-        if bits == GC_OLD_MARKED && refyoung > 0 && ! get_gc_verifying() {
-            self.heap.remset_nptr += nptr;
-            self.heap.remset.push(*v);
-        }
-    }
-
-    fn push_root(&mut self, e: *mut JlValue, d: i32) -> i32 {
-        // N.B. Julia has `gc_findval` to interact with GDB for finding the gc-root for a value.
-        // We should implement something similar for simpler debugging
-
-        debug_assert!(! e.is_null());
-
-        let o = unsafe { &mut *as_mut_jltaggedvalue(e) };
-        // TODO: verify_val(v);
-        let tag = o.read_header();
-        if ! tag.marked() {
-            let mut bits: u8 = 0;
-            if unsafe { intrinsics::likely(self.setmark_tag(o, GC_MARKED, tag, &mut bits)) } {
-                let tag = tag & !0xf;
-                if ! get_gc_verifying() {
-                    self.mark_obj(e, tag, bits);
-                }
-                self.scan_obj(&e, d, tag, bits);
-            }
-            return (! (bits as usize).old()) as i32;
-        }
-        return (! tag.old()) as i32;
-    }
-
-    /// Update metadata of a marked object without scanning it
-    fn mark_obj(&mut self, v: * mut JlValue, tag: usize, bits: u8) {
-        debug_assert!(! v.is_null());
-        debug_assert!((bits as usize).marked());
-
-        let o: * mut JlTaggedValue = as_mut_jltaggedvalue(v);
-        let vtref = tag.type_tag() as * const JlDatatype;
-        let vt = unsafe { &mut * (vtref as * mut JlDatatype) };
-
-        Gc2::assert_datatype(vt);
-
-        debug_assert!(vtref != jl_symbol_type);
-
-        if vtref == jl_simplevector_type {
-            let vec = v as * const JlSVec;
-            let l = unsafe { (*vec).length };
-
-            unsafe {
-                self.setmark(o, bits, l * mem::size_of::<* const libc::c_void>() + mem::size_of::<JlSVec>());
-            }
-
-        } else if vt.name == jl_array_typename {
-            let a = unsafe { &*(v as * const JlArray) };
-            let ref flags = a.flags;
-
-            if flags.pooled() {
-                unsafe {
-                    self.setmark_pool(o, bits);
-                }
-            } else {
-                self.setmark_big(o, bits);
-            }
-
-            if flags.how() == AllocStyle::MallocBuffer {
-                // array is malloc'd
-
-                // In C:
-                // objprofile_count(jl_malloc_tag, bits == GC_OLD_MARKED, a.nbytes())
-
-                if bits == GC_OLD_MARKED {
-                    self.cache.perm_scanned_bytes += a.nbytes();
-                } else {
-                    self.cache.scanned_bytes += a.nbytes();
-                }
-            }
-        } else if vtref == jl_module_type {
-            unsafe {
-                self.setmark(o, bits, mem::size_of::<JlModule>());
-            }
-        } else if vtref == jl_task_type {
-            unsafe {
-                self.setmark(o, bits, mem::size_of::<JlTask>());
-            }
-        } else if vtref == jl_string_type {
-            unsafe {
-                // length of the string
-                let len = *(v as * const usize);
-                self.setmark(o, bits, len + mem::size_of::<usize>() + 1);
-            }
-        } else {
-            unsafe {
-                self.setmark(o, bits, vt.size as usize);
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn assert_datatype(vt: * mut JlDatatype) {
-        if cfg!(debug_assertions) {
-            unsafe {
-                if intrinsics::unlikely(jl_typeof((*vt).as_jlvalue()) != jl_datatype_type) {
-                    np_corruption_fail(vt);
-                }
-            }
-        }
-    }
-
-    fn setmark_tag(&self, o: &mut JlTaggedValue, mark_mode: u8, tag: usize, bits: &mut u8) -> bool {
-        debug_assert!(! tag.marked());
-        debug_assert!((mark_mode as usize).marked(), format!("Found mark_mode {} rather than a marked one", mark_mode));
-
-        let (tag, mark_mode) = if get_mark_reset_age() != 0 {
-            // reset the object's age to young, as if it is just allocated
-            let mut t = tag.clone();
-            t.set_tag(GC_MARKED);
-            (t, GC_MARKED)
-        } else {
-            let mark_mode = if tag.old() {
-                GC_OLD_MARKED
-            } else {
-                mark_mode
-            };
-            (tag | mark_mode as usize, mark_mode)
-        };
-
-        debug_assert!(tag & 0x3 == mark_mode as usize, format!("tag has mark bits {} but mark mode is {}", tag & 0x3, mark_mode));
-
-        *bits = mark_mode;
-        let old_tag = o.header.swap(tag, Ordering::Relaxed);
-        // TODO: verify_val(jl_valueof(o)) !!!
-        ! old_tag.marked()
-    }
-
-    pub fn setmark_buf(&mut self, o: * mut JlValue, mark_mode: u8, minsz: usize) {
-        let buf = unsafe {
-            &mut *as_mut_jltaggedvalue(o)
-        };
-        let tag = buf.read_header();
-
-        if tag.marked() {
-            return;
-        }
-
-        let mut bits = 0;
-
-        if unsafe { intrinsics::likely(self.setmark_tag(buf, mark_mode, tag, &mut bits)) } && ! get_gc_verifying() {
-            if minsz <= GC_MAX_SZCLASS {
-                let maybe_meta = unsafe {
-                    self.pg_mgr.find_pagemeta(o)
-                };
-                match maybe_meta {
-                    Some(meta) => {
-                        // object belongs to a pool managed by page manager
-                        self.setmark_pool_(buf, bits, meta);
-                        return;
-                    }
-                    None => ()
-                }
-            }
-            // object doesn't belong to a pool
-            self.setmark_big(buf, bits);
-        }
-    }
-
-    // update metadata of the page the *marked* pool-allocated object lies in
-    fn setmark_pool_(&mut self, o: * mut JlTaggedValue, mark_mode: u8, meta: &mut PageMeta) {
-        if cfg!(memdebug) {
-            return self.setmark_big(o, mark_mode);
-        }
-
-        if mark_mode == GC_OLD_MARKED {
-            self.cache.perm_scanned_bytes += meta.osize as usize;
-            meta.nold.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.cache.scanned_bytes += meta.osize as usize;
-
-            if get_mark_reset_age() != 0 {
-                meta.has_young = 1;
-                unsafe {
-                    let page_begin = Page::of_raw(o).offset(GC_PAGE_OFFSET as isize);
-                    let obj_id = page_begin.offset_to(mem::transmute::<* mut JlTaggedValue, * const u8>(o)).unwrap() as usize / meta.osize as usize;
-                    // set age of the object in memory pool atomically
-                    meta.ages.as_mut().unwrap()[obj_id / 8].fetch_and(!(1 << (obj_id % 8)), Ordering::Relaxed);
-                }
-            }
-        }
-    }
-
-    unsafe fn setmark_pool(&mut self, o: * mut JlTaggedValue, mark_mode: u8) {
-        let meta = self.pg_mgr.find_pagemeta(o).unwrap();
-        self.setmark_pool_(o, mark_mode, meta);
-    }
-
-    /// Update metadata of the *marked* big object. This method should
-    /// be called *only once* per object.
-    fn setmark_big(&mut self, o: * mut JlTaggedValue, mark_mode: u8) {
-        debug_assert!(unsafe { self.pg_mgr.find_pagemeta(o).is_none() }, "Tried to process marked pool-allocated object as marked big object");
-
-        let hdr = unsafe{
-            BigVal::from_mut_jltaggedvalue(&mut *o)
-        };
-
-        let nbytes = hdr.size(); // the size() method does untagging already
-
-        if mark_mode == GC_OLD_MARKED {
-            // object is old
-            self.cache.perm_scanned_bytes += nbytes;
-            self.gc_queue_big_marked(hdr, false);
-        } else {
-            self.cache.scanned_bytes += nbytes;
-            // object may be young, may be old. however, if object's
-            // age is 0 then it has to be young
-            if get_mark_reset_age() != 0 && hdr.age() != 0 {
-                // reset the age
-                hdr.set_age(0);
-                self.gc_queue_big_marked(hdr, true);
-            }
-        }
-
-        // TODO: objprofile_count(jl_typeof(jl_valueof(o)), mark_mode == GC_OLD_MARKED, nbytes)
-    }
-
-    #[inline(always)]
-    unsafe fn setmark(&mut self, o: * mut JlTaggedValue, mark_mode: u8, sz: usize) {
-        if sz <= GC_MAX_SZCLASS {
-            self.setmark_pool(o, mark_mode);
-        } else {
-            self.setmark_big(o, mark_mode);
-        }
-    }
-
-    fn mark_module(&mut self, m: &mut JlModule, d: i32, bits: u8) -> i32 {
-        let mut refyoung = 0;
-        let mut table = unsafe {
-            slice::from_raw_parts_mut(m.bindings.table, m.bindings.size)
-        };
-
-        let mut i = 1;
-
-        while i < m.bindings.size {
-            if ! HTable::is_not_found(table[i]) {
-                let b = unsafe {
-                    JlBinding::from_jlvalue_mut(&mut *table[i])
-                };
-                self.setmark_buf(b.as_mut_jlvalue(), bits, mem::size_of::<JlBinding>());
-                let vb = as_mut_jltaggedvalue(b.as_mut_jlvalue());
-                verify_parent!("module", m.as_jlvalue(), &unsafe { mem::transmute(vb) }, "binding_buff");
-
-                if ! b.value.is_null() {
-                    verify_parent!("module", m.as_jlvalue(), &b.value, format!("binding({})", CStr::from_ptr(np_jl_symbol_name(b.name)).to_str().unwrap()));
-                    refyoung |= self.push_root(b.value, d);
-                }
-
-                if ! b.globalref.is_null() {
-                    refyoung |= self.push_root(b.globalref, d);
-                }
-            }
-
-            i += 2;
-        }
-
-        for using in m.usings.as_slice_mut() {
-            refyoung |= self.push_root(*using, d);
-        }
-
-        if ! m.parent.is_null() {
-            refyoung |= self.push_root(unsafe { (&mut *m.parent).as_mut_jlvalue() }, d);
-        }
-
-        refyoung
-    }
-
-    fn gc_mark_task(&mut self, ta: &mut JlTask, d: i32, bits: u8) {
-        if ! ta.parent.is_null() {
-            self.push_root(unsafe { (&mut *ta.parent).as_mut_jlvalue() }, d);
-        }
-
-        self.push_root(ta.tls, d);
-        self.push_root(ta.consumers, d);
-        self.push_root(ta.donenotify, d);
-        self.push_root(ta.exception, d);
-
-        if ! ta.backtrace.is_null() {
-            self.push_root(ta.backtrace, d);
-        }
-
-        if ! ta.start.is_null() {
-            self.push_root(ta.start, d);
-        }
-
-        if ! ta.result.is_null() {
-            self.push_root(ta.result, d);
-        }
-
-        self.gc_mark_task_stack(ta, d, bits);
-    }
-
-    fn gc_mark_task_stack(&mut self, ta: &mut JlTask, d: i32, bits: u8) {
-        unsafe {
-            // TODO: make this thread-safe
-            gc_scrub_record_task(ta);
-        }
-
-        let stkbuf = ta.stkbuf != usize::max_value() as * mut libc::c_void && ! ta.stkbuf.is_null();
-        let tid = ta.tid;
-        let ptls2 = unsafe {
-            &mut get_all_tls()[tid as usize]
-        };
-
-        if stkbuf {
-            if cfg!(copy_stacks) {
-                self.setmark_buf(ta.stkbuf, bits, ta.bufsz);
-            } else {
-                if ta as * mut JlTask != ptls2.root_task {
-                    // TODO: give it to the corresponding thread?
-                    self.setmark_buf(ta.stkbuf, bits, ta.ssize);
-                }
-            }
-        }
-
-        if ta as * mut JlTask == ptls2.current_task {
-            // TODO: give it to the corresponding thread?
-            self.gc_mark_stack(&mut *ptls2.pgcstack, 0, 0, usize::max_value(), d);
-        } else if stkbuf {
-            let (offset, lb, ub) = if cfg!(copy_stacks) {
-                let ub = ptls2.stackbase as usize;
-                let lb = ub - ta.ssize;
-                (ta.stkbuf as usize - lb, lb, ub)
-            } else {
-                (0, 0, usize::max_value())
-            };
-            // TODO: give it to the corresponding thread?
-            self.gc_mark_stack(ta.gcstack, offset, lb, ub, d);
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn gc_read_stack<T>(addr: * mut T, offset: usize, lb: usize, ub: usize) -> usize {
-        let a = addr as usize;
-        // correct address if it is within bounds
-        let real_addr = if a >= lb && a < ub {
-            a + offset
-        } else {
-            a
-        };
-        *mem::transmute::<usize, * const usize>(real_addr)
-    }
-
-    fn gc_mark_stack(&mut self, sinit: * mut GcFrame, offset: usize, lb: usize, ub: usize, d: i32) {
-        // leave all hope, ye who enter here
-        // for that there is no more safety guarantees and only memory transmutation
-
-        let mut s = sinit;
-
-        while ! s.is_null() {
-            let nroots = unsafe {
-                Gc2::gc_read_stack(&mut (&mut *s).nroots, offset, lb, ub)
-            };
-            let nr = nroots >> 1;
-            let rts = unsafe {
-                slice::from_raw_parts_mut((s as * mut * mut libc::c_void).offset(2) as * mut * mut * mut JlValue, nr)
-            };
-
-            if nroots & 1 != 0 {
-                // stack is indirected
-                for i in 0..nr {
-                    unsafe {
-                        // read stack slot
-                        let slot: * mut * mut libc::c_void = mem::transmute(Gc2::gc_read_stack(&mut rts[i], offset, lb, ub));
-                        // read object itself
-                        let obj: * mut libc::c_void = mem::transmute(Gc2::gc_read_stack(slot, offset, lb, ub));
-
-                        if ! obj.is_null() {
-                            self.push_root(obj, d);
-                        }
-                    }
-                }
-            } else {
-                // stack has no indirection
-                for i in 0..nr {
-                    // read object
-                    let obj: * mut libc::c_void = unsafe {
-                        mem::transmute(Gc2::gc_read_stack(&mut rts[i], offset, lb, ub))
-                    };
-                    if ! obj.is_null() {
-                        self.push_root(obj, d);
-                    }
-                }
-            }
-
-            unsafe {
-                s = mem::transmute(Gc2::gc_read_stack(&mut (*s).prev, offset, lb, ub));
-            }
-        }
-    }
-
     /// Mark given object concurrent to program execution. This is confusingly called `jl_gc_setmark` in Julia
     pub fn mark_concurrently(&mut self, v: * mut JlValue) {
         let o = unsafe {
@@ -1659,129 +1845,16 @@ impl<'a> Gc2<'a> {
         if ! tag.marked() {
             let mut bits: u8 = 0;
             unsafe {
-                if intrinsics::likely(self.setmark_tag(o, GC_MARKED, tag, &mut bits) && ! get_gc_verifying()) {
-                    self.setmark_pool(o, bits);
+                if intrinsics::likely(Marking::setmark_tag(o, GC_MARKED, tag, &mut bits) && ! get_gc_verifying()) {
+                    self.cache.setmark_pool(o, bits);
                 }
             }
         }
     }
 
     #[inline(always)]
-    fn push_root_if_not_null<T: JlValueLike>(&mut self, p: * mut T, d: i32) {
-        if ! p.is_null() {
-            self.push_root(unsafe { (* p).as_mut_jlvalue() }, d);
-        }
-    }
-
-    pub fn mark_thread_local(&mut self, other: &mut Gc2) {
-        let m = other.tls.current_module.clone();
-        let ct = other.tls.current_task.clone();
-        let rt = other.tls.root_task.clone();
-        let exn = other.tls.exception_in_transit.clone();
-        let ta = other.tls.task_arg_in_transit.clone();
-
-        self.push_root_if_not_null(m, 0);
-        self.push_root_if_not_null(ct, 0);
-        self.push_root_if_not_null(rt, 0);
-        self.push_root_if_not_null(exn, 0);
-        self.push_root_if_not_null(ta, 0);
-    }
-
-    #[inline(always)]
-    fn gc_queue_big_marked(&mut self, hdr: &mut BigVal, toyoung: bool) {
-        let nentry = self.cache.big_obj.len();
-        let mut nobj = self.cache.nbig_obj;
-
-        if unsafe { intrinsics::unlikely(nobj >= nentry) } {
-            self.gc_sync_cache();
-            nobj = 0;
-        }
-
-        if hdr.in_list == true {
-            return;
-        }
-
-        let v = if toyoung {
-            ((hdr as * mut BigVal as usize) | 1) as * mut BigVal
-        } else {
-            hdr as * mut BigVal
-        };
-
-        unsafe {
-            hdr.slot = nobj;
-        }
-
-        self.cache.big_obj[nobj] = v;
-        self.cache.nbig_obj = nobj + 1;
-    }
-
-    fn gc_sync_cache(&mut self) {
-        // TODO: ACHTUNG this may cause some races or broken synchronization
-        // TODO: move marked big objects in cache to big_object marked
-        // ACHTUNG: breaking linearity via unsafe
-        let cache = unsafe { &mut *(&mut self.cache as * mut GcMarkCache) };
-        self.sync_cache_nolock(cache);
-    }
-
-    pub fn mark_roots(&mut self) {
-        // modules
-        self.push_root(unsafe { (*jl_main_module).as_mut_jlvalue() }, 0);
-        self.push_root(unsafe { (*jl_internal_main_module).as_mut_jlvalue() }, 0);
-
-        // invisible builtin values
-        if ! jl_an_empty_vec_any.is_null() {
-            self.push_root(jl_an_empty_vec_any, 0);
-        }
-        if ! jl_module_init_order.is_null() {
-            self.push_root(unsafe { (*jl_module_init_order).as_mut_jlvalue() }, 0);
-        }
-        let f = unsafe { jl_cfunction_list.unknown };
-        self.push_root(f, 0);
-        self.push_root(unsafe { (*jl_anytuple_type_type).as_mut_jlvalue() }, 0);
-        self.push_root(jl_ANY_flag, 0);
-
-        for i in 0..N_CALL_CACHE {
-            if ! call_cache[i].is_null() {
-                self.push_root(call_cache[i], 0);
-            }
-        }
-
-        if ! jl_all_methods.is_null() {
-            self.push_root(unsafe { (*jl_all_methods).as_mut_jlvalue() }, 0);
-        }
-
-        // constants
-        self.push_root(unsafe { (*jl_typetype_type).as_mut_jlvalue() }, 0);
-        self.push_root(unsafe { (*jl_emptytuple_type).as_mut_jlvalue() }, 0);
-    }
-
-    #[inline(always)]
     fn should_timeout() -> bool {
         false
-    }
-
-    /// Visit all objects queued to the mark stack
-    pub fn visit_mark_stack(&mut self) {
-        if ! self.mark_stack.is_empty() {
-            let l = self.mark_stack.len();
-            mark_stack_sum.fetch_add(l, Ordering::Relaxed);
-            mark_stack_num.fetch_add(1, Ordering::Relaxed);
-            mark_stack_max.store(cmp::max(mark_stack_max.load(Ordering::SeqCst), l), Ordering::SeqCst);
-            mark_stack_min.store(cmp::min(mark_stack_min.load(Ordering::SeqCst), l), Ordering::SeqCst);
-        }
-        while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
-            let v = self.mark_stack.pop().unwrap();
-            let header = unsafe { &*as_jltaggedvalue(v) }.read_header();
-            debug_assert_ne!(header, 0);
-
-            self.scan_obj3(&v, 0, header);
-        }
-        debug_assert!(self.mark_stack.is_empty());
-    }
-
-    #[inline(always)]
-    fn scan_obj3(&mut self, v: &* mut JlValue, d: i32, tag: usize) {
-        self.scan_obj(v, d, tag & !15, (tag & 0xf) as u8);
     }
 
     fn clear_freelists(&mut self) {
@@ -1896,8 +1969,7 @@ impl<'a> Gc2<'a> {
         self.clear_freelists();
         // TODO: get this from page manager
         let regions = unsafe { REGIONS.as_mut().unwrap() };
-        let remaining_pages = Arc::new(AtomicUsize::new(self.pg_mgr.current_pg_count)); // Arc+AtomicUsize in preparation for sharing among threads
-        let pg_mgr: Arc<Mutex<& mut PageMgr>> = Arc::new(Mutex::new(self.pg_mgr));
+        let remaining_pages = Arc::new(AtomicUsize::new(pg_mgr().current_pg_count)); // Arc+AtomicUsize in preparation for sharing among threads
         for region in regions {
 
             if remaining_pages.load(Ordering::SeqCst) == 0 {
@@ -1907,8 +1979,8 @@ impl<'a> Gc2<'a> {
             // entry in allocmap
             let check_incomplete_chunk = (region.pg_cnt % 32 != 0) as usize;
             for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
-                Gc2::sweep_pool_chunk(pg_mgr.clone(), region, i, &remaining_pages, full);
-                //Gc2::start_sweep_pool_chunk(pg_mgr.clone(), region, i, &remaining_pages, full); // TODO I just want to do this!!!! lifetimes...
+                Gc2::sweep_pool_chunk(region, i, &remaining_pages, full);
+                //Gc2::start_sweep_pool_chunk(region, i, &remaining_pages, full); // TODO I just want to do this!!!! lifetimes...
             }
             // TODO add barrier to wait for all threads to end...
         }
@@ -1916,89 +1988,101 @@ impl<'a> Gc2<'a> {
 
 /*
     // TODO is this the only way to have a thread start with an empty environment (i.e. wrapping the real call in a function like this?) ?
-    fn start_sweep_pool_chunk(pg_mgr: Arc<Mutex<&mut PageMgr>>, region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
+    fn start_sweep_pool_chunk(region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
         np_threads.unwrap().execute(|| {
-            Gc2::sweep_pool_chunk(pg_mgr, region, i, &remaining_pages, full)
+            Gc2::sweep_pool_chunk(region, i, &remaining_pages, full)
         });
     }
 */
 
-    fn sweep_pool_chunk(pg_mgr: Arc<Mutex<&mut PageMgr>>, region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
-      let mut m = region.allocmap[i];
-      let mut j = 0;
-      while m != 0 {
-          let pg_idx = 32 * i + j;
-          // if current page is not allocated, skip
-          if m & 1 == 0 {
-              m >>= 1;
-              j += 1;
-              continue;
-          }
-          // whether current page should be freed completely
-          let mut should_free = false;
-          // if current page is to be swept
-          // a page is to be swept if it contains young objects or we are
-          // doing a full sweep
-          // TODO: change has_young to bool
-          if full || region.meta[pg_idx].has_young != 0 {
-              let meta = &region.meta[pg_idx];
-              let size = mem::size_of::<JlTaggedValue>() + meta.osize as usize;
-              let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;
-              let padding = (size - JL_SMALL_BYTE_ALIGNMENT) % JL_SMALL_BYTE_ALIGNMENT;
-              let n_obj = aligned_pg_size / (size + padding) as usize;
-              let page = &mut region.pages[pg_idx];
-              let mut nfree = 0;
-              for o_idx in 0..n_obj {
-                  let o = unsafe {
-                      mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
-                  };
-                  if ! o.marked() {
-                      nfree += 1;
-                  }
-              }
-              if nfree != n_obj {
-                  // there are live objects in the page, return free objects to the corresponding free list
-                  let tl_gc: &mut Gc2 = unsafe {
-                      &mut *(get_all_tls()[meta.thread_n as usize].tl_gcs)
-                  };
-                  let freelist = &mut tl_gc.heap.pools[meta.pool_n as usize].freelist;
-                  for o_idx in 0..n_obj {
-                      let o = unsafe {
-                          mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
-                      };
+    fn sweep_pool_chunk(region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
+        let mut bytes_freed = 0;
+        let mut m = region.allocmap[i];
+        let mut j = 0;
+        while m != 0 {
+            let pg_idx = 32 * i + j;
+            // if current page is not allocated, skip
+            if m & 1 == 0 {
+                m >>= 1;
+                j += 1;
+                continue;
+            }
+            // whether current page should be freed completely
+            let mut should_free = false;
+            // if current page is to be swept
+            // a page is to be swept if it contains young objects or we are
+            // doing a full sweep
+            // TODO: change has_young to bool
+            if full || region.meta[pg_idx].has_young != 0 {
+                let meta = &mut region.meta[pg_idx];
+                let size = mem::size_of::<JlTaggedValue>() + meta.osize as usize;
+                let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;
+                let padding = (size - JL_SMALL_BYTE_ALIGNMENT) % JL_SMALL_BYTE_ALIGNMENT;
+                let n_obj = aligned_pg_size / (size + padding) as usize;
+                let page = &mut region.pages[pg_idx];
+                let mut nfree = 0;
+                for o_idx in 0..n_obj {
+                    let o = unsafe {
+                        mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
+                    };
+                    if ! o.marked() {
+                        nfree += 1;
+                    }
+                }
 
-                      if o.marked() {
-                          // clear marks during sweep
-                          o.set_marked(false);
+                bytes_freed += (nfree - meta.nfree as usize) * meta.osize as usize;
 
-                          if full || ! o.old() {
-                              // it is a young object survived till next full sweep, promote it
-                              o.set_old(true);
-                          }
-                          // TODO: better promotion, similar to original one in Julia
-                      } else {
-                          freelist.push(o);
-                      }
-                  }
-              } else {
-                  // page doesn't have anything alive in it, mark it for freeing
-                  // TODO: do lazy sweeping with resets etc.
-                  should_free = true;
-              }
-          }
-          // we free the page here to make borrow checker happy
-          if should_free {
-              // page is unused, free it. we are being a little bit more aggressive here
-              // we need to tell Rust that moving regions here is safe somehow.
-              pg_mgr.lock().unwrap().free_page_in_region(region, pg_idx);
-          }
+                if nfree != n_obj {
+                    // there are live objects in the page, return free objects to the corresponding free list
+                    let tl_gc: &mut Gc2 = unsafe {
+                        &mut *(get_all_tls()[meta.thread_n as usize].tl_gcs)
+                    };
+                    let freelist = &mut tl_gc.heap.pools[meta.pool_n as usize].freelist;
+                    for o_idx in 0..n_obj {
+                        let o = unsafe {
+                            mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
+                        };
 
-          if remaining_pages.fetch_sub(1, Ordering::SeqCst) - 1 == 0 {
-              break;
-          }
-          m >>= 1;
-          j += 1;
-      }
+                        if o.marked() {
+                            // clear marks during sweep
+                            o.set_marked(false);
+
+                            if full || ! o.old() {
+                                // it is a young object survived till next full sweep, promote it
+                                o.set_old(true);
+                            }
+                            // TODO: better promotion, similar to original one in Julia
+                        } else {
+                            freelist.push(o);
+                        }
+                    }
+
+                    // reset #free objects
+                    meta.nfree = nfree as u16;
+                } else {
+                    // page doesn't have anything alive in it, mark it for freeing
+                    // TODO: do lazy sweeping with resets etc.
+                    should_free = true;
+                }
+            }
+            // we free the page here to make borrow checker happy
+            if should_free {
+                // page is unused, free it. we are being a little bit more aggressive here
+                // we need to tell Rust that moving regions here is safe somehow.
+                pg_mgr().free_page_in_region(region, pg_idx);
+            }
+
+            if remaining_pages.fetch_sub(1, Ordering::SeqCst) - 1 == 0 {
+                break;
+            }
+            m >>= 1;
+            j += 1;
+        }
+
+        unsafe {
+            // TODO: make this update atomic for thread-safety
+            gc_num.freed += bytes_freed as i64;
+        }
     }
 
     // sweep bigvals in all threads
@@ -2060,6 +2144,10 @@ impl<'a> Gc2<'a> {
 
                 let begin = b.taggedvalue().get_value() as * const JlValue as usize;
                 // println!("reclaimed 0x{:x} to 0x{:x}", begin, begin + b.size() + BigVal::true_size());
+
+                unsafe {
+                    gc_num.freed += b.allocd_size() as i64;
+                }
 
                 unsafe {
                     Gc2::rust_free(b as * mut BigVal, b.allocd_size());
@@ -2163,6 +2251,7 @@ impl<'a> Gc2<'a> {
             //     }
             // }
             unsafe {
+                gc_num.freed += a.nbytes() as i64;
                 libc::free(d); // on POSIX both cases compile down to free(3)
             }
         }
@@ -2240,7 +2329,7 @@ impl<'a> Gc2<'a> {
                         if last_page != cur_page {
                             // verify that the page metadata is correct
                             let meta = unsafe {
-                                self.pg_mgr.find_pagemeta::<JlTaggedValue>(*o).expect("Pooled object doesn't belong to any memory region!")
+                                pg_mgr().find_pagemeta::<JlTaggedValue>(*o).expect("Pooled object doesn't belong to any memory region!")
                             };
 
                             debug_assert_eq!(p.osize, meta.osize as usize, "Pool and pagemeta object sizes don't match!");
