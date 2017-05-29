@@ -152,8 +152,11 @@ impl<'a> Gc<'a> {
 // representation of big objects
 #[repr(C)]
 pub struct BigVal {
-    next: * mut c_void, // unused
-    prev: * mut c_void, // unused
+    // use uintptr_t here to denote the void pointers. we are not
+    // using them so they should be safe to send over channels to
+    // threads.
+    next: uintptr_t, // unused
+    prev: uintptr_t, // unused
     pub sz_or_age: usize, // unpack this union via methods
     // if this bigval belongs to any thread's big object list, which one. -1 denotes big_objects_marked. Invalid if in_list is false
     pub tid: i16,
