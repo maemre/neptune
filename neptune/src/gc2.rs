@@ -1971,32 +1971,35 @@ impl<'a> Gc2<'a> {
         // TODO: get this from page manager
         let regions = unsafe { REGIONS.as_mut().unwrap() };
         let remaining_pages = Arc::new(AtomicUsize::new(pg_mgr().current_pg_count)); // Arc+AtomicUsize in preparation for sharing among threads
-        for region in regions {
+        for ri in 0..regions.len() {
 
+            let ref mut region = regions[ri];
             if remaining_pages.load(Ordering::SeqCst) == 0 {
                 break;
             }
             // if #pages in region is not a multiple of 32, then we need to check one more
             // entry in allocmap
             let check_incomplete_chunk = (region.pg_cnt % 32 != 0) as usize;
-            for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
-                if PARALLEL_SWEEP {
-                  Gc2::start_sweep_pool_chunk(region, i, &remaining_pages, full);
-                } else {
-                  Gc2::sweep_pool_chunk(region, i, &remaining_pages, full);
+
+            if PARALLEL_SWEEP {
+                let mut pool = unsafe { np_threads.as_mut().unwrap() };
+                pool.scoped(|scope| {
+                    for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
+                        let rp = remaining_pages.clone();
+                        let regions = unsafe { REGIONS.as_mut().unwrap() };
+                        scope.execute(move || {
+                            //println!("Thread executing sweep_pool_chunk()");
+                            Gc2::sweep_pool_chunk(&mut regions[ri], i, &rp, full)
+                        });
+                    }
+                });
+            } else {
+                for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
+                    Gc2::sweep_pool_chunk(region, i, &remaining_pages, full);
                 }
             }
-        }
-    }
 
-    fn start_sweep_pool_chunk(region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
-        let mut pool = unsafe { np_threads.as_mut().unwrap() };
-        pool.scoped(|scope| {
-          scope.execute(|| {
-            //println!("Thread executing sweep_pool_chunk()");
-            Gc2::sweep_pool_chunk(region, i, &remaining_pages, full)
-            });
-        });
+        }
     }
 
     fn sweep_pool_chunk(region: &mut Region, i: usize, remaining_pages: &Arc<AtomicUsize>, full: bool) {
