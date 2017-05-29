@@ -64,7 +64,7 @@ impl PageMgr {
                 rlim_cur: 0,
                 rlim_max: 0
             };
-            
+
             // check what size page it's using, before we do any possible exponential decrease
             println!("initial page count per region: {}", region_pg_count);
 
@@ -85,7 +85,7 @@ impl PageMgr {
             current_pg_count: 0,
         }
     }
-    
+
     // Compute a pointer to the beginning of the page given data pointer lies in
     #[inline(always)]
     unsafe fn align_to_boundary(ptr: * const u8, boundary: usize) -> * const u8 {
@@ -93,7 +93,7 @@ impl PageMgr {
         let bound_lg2 = boundary.trailing_zeros();
         ((ptr as usize >> bound_lg2) << bound_lg2) as * const u8
     }
-    
+
     // Mutable version of page_of
     #[inline(always)]
     unsafe fn align_to_boundary_mut(ptr: * mut u8, boundary: usize) -> * mut u8 {
@@ -101,7 +101,7 @@ impl PageMgr {
         let bound_lg2 = boundary.trailing_zeros();
         ((ptr as usize >> bound_lg2) << bound_lg2) as * mut u8
     }
-    
+
     unsafe fn alloc_unmanaged_array<'a, T>(len: usize, alignment: Option<usize>) -> &'a mut [T] {
         match len.checked_mul(mem::size_of::<T>()) {
             Some(size) => {
@@ -240,7 +240,7 @@ impl PageMgr {
             panic!("GC: out of memory: no regions left!"); // TODO: change with jl_throw
         }
     }
-    
+
     // free page with given pointer
     pub fn free_page(&mut self, regions: &mut [Region], p: * const u8) {
         let mut pg_idx = None;
