@@ -23,6 +23,8 @@ use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
 use util::*;
+use concurrency::*;
+use std::sync::*;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -832,13 +834,15 @@ pub enum GcState {
 }
 
 // expose page manager
-static mut PAGE_MGR: Option<PageMgr> = None;
+static mut PAGE_MGR: Option<Mutex<PageMgr>> = None;
 
-/// Expose the global page manager. This is not thread-safe right now.
+// Expose the global page manager. Trying to make thread-safe
+// via a mutex; won't do much until we have actual threading used in sweep_pools(), etc
+// where this would help.
 #[inline(always)]
-pub fn pg_mgr() -> &'static mut PageMgr {
+pub fn pg_mgr<'a>() -> MutexGuard<'a, PageMgr> {
     unsafe {
-        PAGE_MGR.as_mut().unwrap()
+        PAGE_MGR.as_ref().unwrap().lock().unwrap()
     }
 }
 
@@ -938,7 +942,7 @@ pub unsafe extern fn neptune_init_page_mgr() {
 
     println!("page offset: {}", GC_PAGE_OFFSET);
 
-    PAGE_MGR = Some(PageMgr::new());
+    PAGE_MGR = Some(Mutex::new(PageMgr::new()));
     REGIONS = Some(Vec::with_capacity(REGION_COUNT));
     let regions = REGIONS.as_mut().unwrap();
     for i in 0..REGION_COUNT {
@@ -949,12 +953,12 @@ pub unsafe extern fn neptune_init_page_mgr() {
 #[no_mangle]
 pub unsafe extern fn neptune_alloc_page<'a>() -> * mut u8 {
     // if PAGE_MGR is uninitialized, we're better off crashing anyways
-    PAGE_MGR.as_mut().unwrap().alloc_page(&mut REGIONS.as_mut().unwrap()).data.as_mut_ptr()
+    pg_mgr().alloc_page(&mut REGIONS.as_mut().unwrap()).data.as_mut_ptr()
 }
 
 #[no_mangle]
 pub unsafe extern fn neptune_free_page<'a>(data: * const u8) {
-    PAGE_MGR.as_mut().unwrap().free_page(REGIONS.as_mut().unwrap().as_mut_slice(), data);
+    pg_mgr().free_page(REGIONS.as_mut().unwrap().as_mut_slice(), data);
 }
 
 //------------------------------------------------------------------------------
