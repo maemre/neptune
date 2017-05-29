@@ -1,8 +1,11 @@
 use std::sync::*;
 use std::slice;
+use libc;
 
-/// Concurrent, thread-safe stack implementation.
-/// All accesses to this data structure are blocking.
+/// Concurrent, thread-safe stack implementation.  All accesses to
+/// this data structure are blocking.  This data structure overrides
+/// some of Rust's safety guarantees for sending raw pointers. Use it
+/// at your own risk with raw pointers.
 pub struct ConcurrentStack<T> {
     vec: Arc<Mutex<Vec<T>>>,
 }
@@ -47,3 +50,6 @@ impl<T> ConcurrentStack<T> {
         self.truncate(0);
     }
 }
+
+// unsafe impl<T> Sync for ConcurrentStack<* mut T> {}
+unsafe impl Sync for ConcurrentStack<* mut libc::c_void> {}
