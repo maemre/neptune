@@ -14,10 +14,11 @@
 #![feature(const_fn)]
 // to iterate over ranges with steps different than 1
 #![feature(step_by)]
+
 extern crate libc;
 extern crate core;
 extern crate alloc;
-extern crate threadpool;
+extern crate scoped_threadpool;
 
 //#[cfg(test)]
 //mod tests;

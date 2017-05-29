@@ -692,6 +692,8 @@ void jl_gc_init(void)
     if (maxmem > max_collect_interval)
         max_collect_interval = maxmem;
 #endif
+
+    neptune_init_gc();
 }
 
 JL_DLLEXPORT void *jl_gc_counted_malloc(size_t sz)
