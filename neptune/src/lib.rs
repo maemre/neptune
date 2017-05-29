@@ -19,6 +19,7 @@ extern crate libc;
 extern crate core;
 extern crate alloc;
 extern crate scoped_threadpool;
+extern crate crossbeam;
 
 //#[cfg(test)]
 //mod tests;

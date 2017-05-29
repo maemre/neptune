@@ -15,6 +15,7 @@ use std::env;
 use std::cmp;
 use concurrency::*;
 use scoped_threadpool::Pool;
+use crossbeam::sync::*;
 
 const PARALLEL_SWEEP: bool = true;
         
@@ -320,7 +321,7 @@ mod jltagged_value_tests {
 
 // A GC Pool used for pooled allocation
 pub struct GcPool<'a> {
-    freelist: Vec<&'a mut JlTaggedValue>, // list of free objects, a vec is more packed
+    freelist: SegQueue<&'a mut JlTaggedValue>, // list of free objects, a vec is more packed
     newpages: Vec<JlTaggedValue>, // list of chunks of free objects (an optimization...)
     osize: usize                  // size of each object in this pool, could've been u16
 }
@@ -328,7 +329,7 @@ pub struct GcPool<'a> {
 impl<'a> GcPool<'a> {
     pub fn new(size: usize) -> Self {
         GcPool {
-            freelist: Vec::new(),
+            freelist: SegQueue::new(),
             newpages: Vec::new(), // optimization, currently unused
             osize: size,
         }
@@ -336,7 +337,8 @@ impl<'a> GcPool<'a> {
 
     #[inline(always)]
     pub fn clear_freelist(&mut self) {
-        self.freelist.clear()
+        // self.freelist.clear()
+        self.freelist = SegQueue::new()
     }
 }
 
@@ -1454,7 +1456,7 @@ impl<'a> Gc2<'a> {
                 // We are not using newpages and adding new pages to freelist for now.
                 // We can implement newpages as an optimization later on.
                 // TODO: do extra bookkeeping about marking pagemetas etc.
-                if let Some(v) = self.heap.pools[pool_index].freelist.pop() {
+                if let Some(v) = self.heap.pools[pool_index].freelist.try_pop() {
                     let pool = &self.heap.pools[pool_index];
                     let meta = unsafe {
                         pg_mgr().find_pagemeta(v).unwrap()
@@ -1476,7 +1478,7 @@ impl<'a> Gc2<'a> {
                 } else {
                     self.add_page(pool_index);
                     let ref mut pool = self.heap.pools[pool_index];
-                    let v = pool.freelist.pop().unwrap();
+                    let v = pool.freelist.try_pop().unwrap();
                     let meta = unsafe {
                         pg_mgr().find_pagemeta(v).unwrap()
                     };
@@ -1518,7 +1520,7 @@ impl<'a> Gc2<'a> {
         let (size, padding) = meta.reset(poolIndex as u8);
 
         // add objects to freelist
-        pool.freelist.reserve(meta.nfree as usize);
+        // pool.freelist.reserve(meta.nfree as usize);
         // println!("object size: {}, computed size: {}, # free objects: {}", meta.osize, size, meta.nfree);
         for i in 0..(meta.nfree as usize) {
             let v: &mut JlTaggedValue = unsafe {
@@ -2325,6 +2327,9 @@ impl<'a> Gc2<'a> {
                     // for all fools, iterate its freelist
                     let mut last_page = Page::of_raw::<u8>(::std::ptr::null());
                     // TODO: have `allocated` and check it too, gc-debug.c:262
+
+                    // TODO: fix for SegQueue
+                    /*
                     for o in p.freelist.iter_mut() {
                         // and assert that freelist values aren't gc-marked
                         debug_assert!(! o.marked(), "There are marked objects in the freelists.");
@@ -2344,6 +2349,7 @@ impl<'a> Gc2<'a> {
                             last_page = cur_page;
                         }
                     }
+                     */
                 }
             }
         }
