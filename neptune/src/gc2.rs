@@ -16,6 +16,9 @@ use std::cmp;
 use concurrency::*;
 use scoped_threadpool::Pool;
 
+// parallelization flags
+const PARALLEL_MARK: bool = false;
+
 const PURGE_FREED_MEMORY: bool = false;
 
 const TAG_BITS: u8 = 2; // number of tag bits
@@ -1112,6 +1115,7 @@ impl Marking {
         // Channel to synchronize when the worker threads are finished
         let (tx, rx) = mpsc::channel();
         let mut n_jobs = 0;
+        let marker = Arc::new(self);
 
         if ! self.mark_stack.is_empty() {
             let l = self.mark_stack.len();
@@ -1120,23 +1124,42 @@ impl Marking {
             mark_stack_max.store(cmp::max(mark_stack_max.load(Ordering::SeqCst), l), Ordering::SeqCst);
             mark_stack_min.store(cmp::min(mark_stack_min.load(Ordering::SeqCst), l), Ordering::SeqCst);
         }
-        while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
-            // casting to let Rust send this pointer over threads
-            let v = self.mark_stack.pop().unwrap() as usize;
-            let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
-            debug_assert_ne!(header, 0);
-            let tx = tx.clone();
-            self.scan_obj3(&(v as * mut JlValue), 0, header);
-            thread_pool.execute(move || {
-                // signal that this job is done
-                tx.send(());
-            });
+        if PARALLEL_MARK {
+            // the outer loop is for the cases where the stack becomes empty while we are synchronizing
+            while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
+                thread_pool.scoped(|scope| {
+                    while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
+                        let marker = marker.clone();
+                        // casting to let Rust send this pointer over threads
+                        let v = self.mark_stack.pop().unwrap() as usize;
+                        let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
+                        debug_assert_ne!(header, 0);
+                        let tx = tx.clone();
+                        scope.execute(move || {
+                            marker.scan_obj3(&(v as * mut JlValue), 0, header);
+                            // signal that this job is done
+                            tx.send(());
+                        });
 
-            n_jobs += 1;
+                        n_jobs += 1;
+                    }
+                    // synchronize with the worker threads
+                    rx.iter().take(n_jobs).fold((), |x, y| {});
+                });
+            }
+        } else {
+            while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
+                let marker = marker.clone();
+                // casting to let Rust send this pointer over threads
+                let v = self.mark_stack.pop().unwrap() as usize;
+                let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
+                debug_assert_ne!(header, 0);
+                let tx = tx.clone();
+                marker.scan_obj3(&(v as * mut JlValue), 0, header);
+                n_jobs += 1;
+            }
         }
-        // synchronize with the worker threads
-        rx.iter().take(n_jobs).fold((), |x, y| {});
-        debug_assert!(self.mark_stack.is_empty());
+        assert!(self.mark_stack.is_empty());
     }
 
 
