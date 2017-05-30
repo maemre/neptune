@@ -1246,9 +1246,9 @@ impl Marking {
                     let v = self.mark_stack.pop().unwrap() as usize;
                     let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
                     debug_assert_ne!(header, 0);
-                    self.scan_obj3(&(v as * mut JlValue), 0, header);
                     scope.execute(move || {
                         n_started.fetch_add(1, Ordering::SeqCst);
+                        self.scan_obj3(&(v as * mut JlValue), 0, header);
                         n_finished.fetch_add(1, Ordering::SeqCst);
                     });
 
