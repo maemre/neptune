@@ -19,8 +19,8 @@ use crossbeam::sync::*;
 use std::thread;
 use std::collections::HashMap;
 
-const PARALLEL_SWEEP: bool = true;
-        
+const PARALLEL_SWEEP: bool = false;
+
 const PURGE_FREED_MEMORY: bool = false;
 
 const TAG_BITS: u8 = 2; // number of tag bits
@@ -323,7 +323,7 @@ mod jltagged_value_tests {
 
 // A GC Pool used for pooled allocation
 pub struct GcPool<'a> {
-    freelist: SegQueue<&'a mut JlTaggedValue>, // list of free objects, a vec is more packed
+    freelist: Vec<&'a mut JlTaggedValue>, // list of free objects, a vec is more packed
     newpages: Vec<JlTaggedValue>, // list of chunks of free objects (an optimization...)
     osize: usize                  // size of each object in this pool, could've been u16
 }
@@ -331,7 +331,7 @@ pub struct GcPool<'a> {
 impl<'a> GcPool<'a> {
     pub fn new(size: usize) -> Self {
         GcPool {
-            freelist: SegQueue::new(),
+            freelist: Vec::new(),
             newpages: Vec::new(), // optimization, currently unused
             osize: size,
         }
@@ -340,7 +340,7 @@ impl<'a> GcPool<'a> {
     #[inline(always)]
     pub fn clear_freelist(&mut self) {
         // self.freelist.clear()
-        self.freelist = SegQueue::new()
+        self.freelist = Vec::new()
     }
 }
 
@@ -1509,7 +1509,7 @@ impl<'a> Gc2<'a> {
                 // We are not using newpages and adding new pages to freelist for now.
                 // We can implement newpages as an optimization later on.
                 // TODO: do extra bookkeeping about marking pagemetas etc.
-                if let Some(v) = self.heap.pools[pool_index].freelist.try_pop() {
+                if let Some(v) = self.heap.pools[pool_index].freelist.pop() {
                     let pool = &self.heap.pools[pool_index];
                     let meta = unsafe {
                         pg_mgr().find_pagemeta(v).unwrap()
@@ -1531,7 +1531,7 @@ impl<'a> Gc2<'a> {
                 } else {
                     self.add_page(pool_index);
                     let ref mut pool = self.heap.pools[pool_index];
-                    let v = pool.freelist.try_pop().unwrap();
+                    let v = pool.freelist.pop().unwrap();
                     let meta = unsafe {
                         pg_mgr().find_pagemeta(v).unwrap()
                     };
@@ -2049,7 +2049,7 @@ impl<'a> Gc2<'a> {
             let check_incomplete_chunk = (region.pg_cnt % 32 != 0) as usize;
 
             if PARALLEL_SWEEP {
-                let mut pool = unsafe { np_threads.as_mut().unwrap() };
+                /*let mut pool = unsafe { np_threads.as_mut().unwrap() };
                 pool.scoped(|scope| {
                     for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
                         let rp = remaining_pages.clone();
@@ -2059,7 +2059,7 @@ impl<'a> Gc2<'a> {
                             Gc2::sweep_pool_chunk(&mut regions[ri], i, &rp, full)
                         });
                     }
-                });
+                });*/
             } else {
                 for i in 0..(region.pg_cnt as usize / 32 + check_incomplete_chunk) {
                     Gc2::sweep_pool_chunk(region, i, &remaining_pages, full);
