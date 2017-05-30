@@ -21,7 +21,7 @@ use std::sync::atomic::*;
 use std::ffi::CString;
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use util::*;
 use concurrency::*;
 use std::sync::*;
@@ -1024,11 +1024,9 @@ pub extern fn neptune_get_pgcnt<'a>(region: &mut Region<'a>) -> u32 {
 
 #[no_mangle]
 pub extern fn neptune_init_gc() {
-    // piggybacking here, TODO: move to gc_init
     unsafe {
         big_objects_marked = Some(Box::new(Mutex::new(Vec::new())));
-        the_global_big_obj_list = Some(Mutex::new(Vec::new()));
-        mark_cache = Some(Mutex::new(MarkCache::new()));
+        mark_caches = Some(HashMap::new());
     }
 
     assert_eq!(mem::size_of::<BigVal>(), 56, "BigVal+TaggedValue should align to 64 bytes!");
@@ -1043,8 +1041,6 @@ pub extern fn neptune_init_gc() {
     };
     println!("Starting neptune with {} threads", num_threads);
     unsafe { np_threads = Some(Pool::new(num_threads)) };
-
-    // end of gc_init
 }
 
 #[no_mangle]

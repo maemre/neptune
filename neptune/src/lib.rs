@@ -14,6 +14,8 @@
 #![feature(const_fn)]
 // to iterate over ranges with steps different than 1
 #![feature(step_by)]
+// to access the thread-local stored values
+#![feature(thread_id)]
 
 extern crate libc;
 extern crate core;

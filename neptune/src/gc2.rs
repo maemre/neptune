@@ -16,6 +16,8 @@ use std::cmp;
 use concurrency::*;
 use scoped_threadpool::Pool;
 use crossbeam::sync::*;
+use std::thread;
+use std::collections::HashMap;
 
 const PARALLEL_SWEEP: bool = true;
         
@@ -519,25 +521,22 @@ pub struct MarkCache {
     // GC-thread local cache for remsets
     pub remset_nptr: usize,
     pub remset: Vec<* mut JlValue>,
+    // secondary big object list for GC thread mark caches
+    big_obj_list: Vec<* mut BigVal>,
 }
 
 
 /// to-be thread-local mark cache for GC threads. TODO: make this thread-local
-pub static mut mark_cache: Option<Mutex<MarkCache>> = None;
+pub static mut mark_caches: Option<HashMap<thread::ThreadId, MarkCache>> = None;
 
 /// Get _GC thread-local_ mark cache used for marking. This function
 /// does not provide access to Julia threads' mark caches. To access
 /// those mark caches, use the coressponding JlTLS object or Gc2
 /// object.
-pub fn gc_cache<'a>() -> MutexGuard<'a, MarkCache> {
-    unsafe { mark_cache.as_ref().unwrap() }.lock().unwrap()
-}
-
-/// to-be GC-thread-local big object list, we need to figure out thread IDs for objects put here somehow.
-pub static mut the_global_big_obj_list: Option<Mutex<Vec<&'static mut BigVal>>> = None;
-
-pub fn global_big_obj_list<'a>() -> MutexGuard<'a, Vec<&'static mut BigVal>> {
-    unsafe { the_global_big_obj_list.as_ref().unwrap() }.lock().unwrap()
+pub fn gc_cache<'a>() -> &'a mut MarkCache {
+    let mc = unsafe { mark_caches.as_mut().unwrap() };
+    let tid = thread::current().id();
+    mc.entry(tid).or_insert_with(|| MarkCache::new())
 }
 
 impl MarkCache {
@@ -549,6 +548,7 @@ impl MarkCache {
             big_obj: [::std::ptr::null_mut(); BIG_OBJ_CACHE_SIZE],
             remset_nptr: 0,
             remset: Vec::new(),
+            big_obj_list: Vec::new(),
         }
     }
 
@@ -657,7 +657,7 @@ impl MarkCache {
         let mut nobj = self.nbig_obj;
 
         if unsafe { intrinsics::unlikely(nobj >= nentry) } {
-            self.sync_cache(&mut *global_big_obj_list(), -1);
+            self.sync_self_cache();
             nobj = 0;
         }
 
@@ -679,8 +679,40 @@ impl MarkCache {
         self.nbig_obj = nobj + 1;
     }
 
-    // TODO: make sure that access to local_obj_list is thread-safe
-    fn sync_cache(&mut self, local_obj_list: &mut Vec<&mut BigVal>, tid: i16) {
+    fn sync_self_cache(&mut self) {
+        let nbig = self.nbig_obj;
+
+        for i in 0..nbig {
+            let ptr = self.big_obj[i].clone();
+            let hdr = unsafe {
+                &mut *((ptr as usize).clear_tag(1) as * mut BigVal)
+            };
+
+            Gc2::unlink_big_object(hdr);
+
+            if ((ptr as usize) & 1) != 0 {
+                hdr.slot = self.big_obj_list.len();
+                hdr.tid = -1;
+                hdr.in_list = true;
+                self.big_obj_list.push(hdr);
+            } else {
+                // move from `big_objects` to `big_objects_marked`
+                unsafe {
+                    // TODO: fix my attempt at making thread-safe
+                    let mut bo: MutexGuard<Vec<* mut BigVal>> = big_objects_marked.as_mut().unwrap().lock().unwrap();
+                    (*bo).push(hdr);
+                    hdr.in_list = true;
+                    hdr.slot = (*bo).len();
+                    hdr.tid = -1;
+                }
+            }
+        }
+
+        self.nbig_obj = 0;
+    }
+
+    /// Synchronize caches without locking. Caller must guarantee that this is called in a single-threaded context.
+    pub unsafe fn sync_cache_nolock(&mut self, local_obj_list: &mut Vec<&mut BigVal>, tid: i16) {
         let nbig = self.nbig_obj;
 
         for i in 0..nbig {
@@ -699,8 +731,8 @@ impl MarkCache {
             } else {
                 // move from `big_objects` to `big_objects_marked`
                 unsafe {
-                    // TODO: fix my attempt at making thread-safe
-                    let mut bo: MutexGuard<Vec<* mut BigVal>> = big_objects_marked.as_mut().unwrap().lock().unwrap();
+                    // get the value without locking the global object. this is not thread-safe but ok.
+                    let mut bo = big_objects_marked.as_mut().unwrap().get_mut().unwrap();
                     (*bo).push(hdr);
                     hdr.in_list = true;
                     hdr.slot = (*bo).len();
@@ -718,6 +750,27 @@ impl MarkCache {
 
         self.perm_scanned_bytes = 0;
         self.scanned_bytes = 0;
+    }
+
+    /// Synchronize unmarked big objects
+    pub fn sync_big_objects(&mut self, gc: &mut Gc2) {
+        // simulate linking to that list
+        let start = gc.heap.big_objects.len();
+        gc.heap.big_objects.append(unsafe {
+            mem::transmute::<&mut Vec<*mut BigVal>, &mut Vec<&mut BigVal>>(&mut self.big_obj_list)
+        });
+        for i in start..gc.heap.big_objects.len() {
+            let ref mut hdr = gc.heap.big_objects[i];
+            assert!(hdr.in_list);
+            hdr.slot = i;
+            hdr.tid = gc.tid;
+        }
+    }
+
+    pub fn sync_remset(&mut self, gc: &mut Gc2) {
+        gc.heap.remset.append(&mut self.remset);
+        gc.heap.remset_nptr += self.remset_nptr;
+        self.remset_nptr = 0;
     }
 }
 
@@ -743,34 +796,34 @@ impl Marking {
 
     pub fn mark_roots(&self) {
         // modules
-        self.push_root(unsafe { (*jl_main_module).as_mut_jlvalue() }, 0);
-        self.push_root(unsafe { (*jl_internal_main_module).as_mut_jlvalue() }, 0);
+        self.push_root(unsafe { (*jl_main_module).as_mut_jlvalue() }, MAX_MARK_DEPTH);
+        self.push_root(unsafe { (*jl_internal_main_module).as_mut_jlvalue() }, MAX_MARK_DEPTH);
 
         // invisible builtin values
         if ! jl_an_empty_vec_any.is_null() {
-            self.push_root(jl_an_empty_vec_any, 0);
+            self.push_root(jl_an_empty_vec_any, MAX_MARK_DEPTH);
         }
         if ! jl_module_init_order.is_null() {
-            self.push_root(unsafe { (*jl_module_init_order).as_mut_jlvalue() }, 0);
+            self.push_root(unsafe { (*jl_module_init_order).as_mut_jlvalue() }, MAX_MARK_DEPTH);
         }
         let f = unsafe { jl_cfunction_list.unknown };
-        self.push_root(f, 0);
-        self.push_root(unsafe { (*jl_anytuple_type_type).as_mut_jlvalue() }, 0);
-        self.push_root(jl_ANY_flag, 0);
+        self.push_root(f, MAX_MARK_DEPTH);
+        self.push_root(unsafe { (*jl_anytuple_type_type).as_mut_jlvalue() }, MAX_MARK_DEPTH);
+        self.push_root(jl_ANY_flag, MAX_MARK_DEPTH);
 
         for i in 0..N_CALL_CACHE {
             if ! call_cache[i].is_null() {
-                self.push_root(call_cache[i], 0);
+                self.push_root(call_cache[i], MAX_MARK_DEPTH);
             }
         }
 
         if ! jl_all_methods.is_null() {
-            self.push_root(unsafe { (*jl_all_methods).as_mut_jlvalue() }, 0);
+            self.push_root(unsafe { (*jl_all_methods).as_mut_jlvalue() }, MAX_MARK_DEPTH);
         }
 
         // constants
-        self.push_root(unsafe { (*jl_typetype_type).as_mut_jlvalue() }, 0);
-        self.push_root(unsafe { (*jl_emptytuple_type).as_mut_jlvalue() }, 0);
+        self.push_root(unsafe { (*jl_typetype_type).as_mut_jlvalue() }, MAX_MARK_DEPTH);
+        self.push_root(unsafe { (*jl_emptytuple_type).as_mut_jlvalue() }, MAX_MARK_DEPTH);
     }
 
     pub fn walk_roots(&self) {
@@ -1664,13 +1717,21 @@ impl<'a> Gc2<'a> {
         Gc2::verify_to_finalize();
 
         // flush everything in mark caches
-        // TODO: revisit this part
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * t.tl_gcs };
             // this is self, not tl_gc!
-            tl_gc.cache.sync_cache(&mut self.heap.big_objects, self.tid);
+            unsafe {
+                tl_gc.cache.sync_cache_nolock(&mut self.heap.big_objects, self.tid);
+            }
         }
 
+        for cache in unsafe { mark_caches.as_mut().unwrap().values_mut() } {
+            unsafe {
+                cache.sync_cache_nolock(&mut self.heap.big_objects, self.tid);
+            }
+            cache.sync_big_objects(self);
+            cache.sync_remset(self);
+        }
 
         let live_sz_ub: i64 = unsafe {
             live_bytes + actual_allocd
