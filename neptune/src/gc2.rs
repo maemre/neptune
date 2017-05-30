@@ -35,7 +35,7 @@ const GC_MARKED: u8 = 1;
 const GC_OLD: u8 = 2;
 const GC_OLD_MARKED: u8 = (GC_OLD | GC_MARKED);
 
-const MAX_MARK_DEPTH: i32 = 4;
+const MAX_MARK_DEPTH: i32 = 40;
 
 const DEFAULT_COLLECT_INTERVAL: isize = 5600 * 1024 * 8;
 const MAX_COLLECT_INTERVAL: usize = 1250000000;
@@ -2528,22 +2528,53 @@ impl<'a> Gc2<'a> {
         }
     }
 
-    fn print_big_object_lists() {
-        println!("--------------------");
+    fn print_big_object(b: &BigVal) {
+        let pb = b as * const BigVal as usize;
+        let t = b.taggedvalue().tag();
+        print!(" 0x{:x} [{}]", pb, t);
+    }
+
+    fn print_big_object_lists(full: bool) {
+        println!("-------------------- after {} collection", if full { "full" } else { "quick" });
         for t in unsafe { get_all_tls() } {
             let gc = unsafe { &mut * t.tl_gcs };
 
             print!("big objects in t{}'s list:", t.tid);
 
             for b in gc.heap.big_objects.iter() {
-                print!(" 0x{:x}", *b as * const BigVal as usize);
+                assert!(b.tid == gc.tid);
+                // Gc2::print_big_object(b);
             }
             println!();
 
             print!("big objects in t{}'s cache:", t.tid);
 
             for i in 0..gc.cache.nbig_obj {
-                print!(" 0x{:x}", gc.cache.big_obj[i] as usize);
+                Gc2::print_big_object(unsafe { &*gc.cache.big_obj[i] });
+            }
+            println!();
+
+            print!("big objects in t{}'s cache's biglist:", t.tid);
+
+            for i in 0..gc.cache.big_obj_list.len() {
+                Gc2::print_big_object(unsafe { &*gc.cache.big_obj_list[i] });
+            }
+            println!();
+        }
+
+        for (t, c) in unsafe { mark_caches.as_ref().unwrap() } {
+
+            print!("big objects in GC thread {:?}'s cache:", t);
+
+            for i in 0..c.nbig_obj {
+                Gc2::print_big_object(unsafe { &*c.big_obj[i] });
+            }
+            println!();
+
+            print!("big objects in GC thread {:?}'s cache's biglist:", t);
+
+            for i in 0..c.big_obj_list.len() {
+                Gc2::print_big_object(unsafe { &*c.big_obj_list[i] });
             }
             println!();
         }
@@ -2552,10 +2583,42 @@ impl<'a> Gc2<'a> {
 
         let bo = unsafe { big_objects_marked.as_mut().unwrap().lock().unwrap() };
         for b in (*bo).iter() {
-            print!(" 0x{:x}", *b as usize);
+            Gc2::print_big_object(unsafe { &**b });
         }
         println!();
         println!("--------------------");
+    }
+
+    fn print_object(b: & JlValue) {
+        let pb = b as * const JlValue as usize;
+        let t = unsafe { &*as_jltaggedvalue(b) }.tag();
+        print!(" 0x{:x} [{}]", pb, t);
+    }
+
+    fn verify_remsets() {
+        for t in unsafe { get_all_tls() } {
+            let gc = unsafe { &mut * t.tl_gcs };
+            assert!(gc.cache.remset.is_empty());
+            /*
+            print!("big objects in t{}'s cache's remset:", t.tid);
+
+            for i in 0..gc.cache.remset.len() {
+                Gc2::print_object(unsafe { &*gc.cache.remset[i] });
+            }
+            println!();*/
+        }
+
+        for (t, c) in unsafe { mark_caches.as_ref().unwrap() } {
+            assert!(c.remset.is_empty());
+            /*
+            print!("big objects in GC thread {:?}'s cache's remset:", t);
+
+            for i in 0..c.remset.len() {
+                Gc2::print_object(unsafe { &*c.remset[i] });
+            }
+            println!();
+             */
+        }
     }
 
     fn sweep(&mut self, full: bool) {
@@ -2573,6 +2636,8 @@ impl<'a> Gc2<'a> {
         // println!("sweeping bigvals");
         self.sweep_bigvals(full);
 
+        // Gc2::print_big_object_lists(full);
+
         // println!("scrubbing");
         self.scrub();
 
@@ -2582,11 +2647,13 @@ impl<'a> Gc2<'a> {
         // println!("sweeping pools");
         self.sweep_pools(full);
 
+        // Gc2::verify_remsets();
         // println!("sweeping remsets");
         for t in unsafe { get_all_tls() } {
             let tl_gc = unsafe { &mut * (*t).tl_gcs };
             tl_gc.sweep_remset(full);
         }
+        // Gc2::verify_remsets();
 
         // println!("done sweeping")
     }
