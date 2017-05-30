@@ -33,7 +33,7 @@ const GC_MARKED: u8 = 1;
 const GC_OLD: u8 = 2;
 const GC_OLD_MARKED: u8 = (GC_OLD | GC_MARKED);
 
-const MAX_MARK_DEPTH: i32 = 400;
+const MAX_MARK_DEPTH: i32 = 4;
 
 const DEFAULT_COLLECT_INTERVAL: isize = 5600 * 1024 * 8;
 const MAX_COLLECT_INTERVAL: usize = 1250000000;
@@ -69,11 +69,6 @@ static GC_SIZE_CLASSES: [usize; GC_N_POOLS] = [
 const GC_MAX_SZCLASS: usize = 2032 - 8; // 8 is mem::size_of::<libc::uintptr_t>(), size_of isn't a const fn yet :(
 
 static GC_ALREADY_RUN: AtomicBool = AtomicBool::new(false);
-
-pub static mark_stack_sum: AtomicUsize = AtomicUsize::new(0);
-pub static mark_stack_max: AtomicUsize = AtomicUsize::new(0);
-pub static mark_stack_min: AtomicUsize = AtomicUsize::new(usize::max_value());
-pub static mark_stack_num: AtomicUsize = AtomicUsize::new(0);
 
 /*
  * in julia/src/julia.h:
@@ -150,8 +145,13 @@ impl JlTaggedValue {
 
     /// Read header with no memory guarantee. this is not thread safe w.r.t. other GC threads!
     #[inline(always)]
-    pub fn yolo_unsafe_header(&mut self) -> libc::uintptr_t {
+    pub unsafe fn yolo_header(&mut self) -> libc::uintptr_t {
         self.header.get_mut().clone()
+    }
+
+    /// Set header in an unsafe manner. This is not thread-safe w.r.t. GC threads
+    pub unsafe fn yolo_set_header(&mut self, header: usize) {
+        *self.header.get_mut() = header;
     }
 
     // pointer to type of this value
@@ -238,6 +238,51 @@ impl GcTag for usize {
     #[inline(always)]
     fn nontype_tag(&self) -> libc::uintptr_t {
         self & 0x0f
+    }
+}
+
+impl GcTag for u8 {
+    // this is bits in Julia
+    #[inline(always)]
+    fn tag(&self) -> u8 {
+        self.get_bits(TAG_RANGE)
+    }
+
+    #[inline(always)]
+    fn set_tag(&mut self, tag: u8) {
+        self.set_bits(TAG_RANGE, tag);
+    }
+
+    #[inline(always)]
+    fn marked(&self) -> bool {
+        self.get_bit(0)
+    }
+
+    #[inline(always)]
+    fn set_marked(&mut self, flag: bool) {
+        self.set_bit(0, flag);
+    }
+
+    #[inline(always)]
+    fn old(&self) -> bool {
+        self.get_bit(1)
+    }
+
+    #[inline(always)]
+    fn set_old(&mut self, flag: bool) {
+        self.set_bit(1, flag);
+    }
+
+    // pointer to type of this value
+    #[inline(always)]
+    fn type_tag(&self) -> libc::uintptr_t {
+        panic!("u8 has no type tag")
+    }
+
+    // bits used for GC etc.
+    #[inline(always)]
+    fn nontype_tag(&self) -> libc::uintptr_t {
+        (self & 0x0f) as usize
     }
 }
 
@@ -1139,7 +1184,7 @@ impl Marking {
             // cannot borrow array item because non-lexical borrowing hasn't landed to Rust yet
             let item = other.heap.last_remset[i].clone();
             let tag = unsafe { &*as_jltaggedvalue(item) };
-            self.scan_obj3(&item, 0, tag.read_header());
+            self.scan_obj3(&item, MAX_MARK_DEPTH, tag.read_header());
         }
 
         let mut n_bnd_refyoung = 0;
@@ -1149,7 +1194,7 @@ impl Marking {
                 continue;
             }
 
-            let is_young = self.push_root(other.heap.rem_bindings[i].value, 0) != 0; // for lexical borrow
+            let is_young = self.push_root(other.heap.rem_bindings[i].value, MAX_MARK_DEPTH) != 0; // for lexical borrow
 
             if is_young {
                 // reusing processed indices
@@ -1171,13 +1216,6 @@ impl Marking {
         let mut n_started = Arc::new(AtomicUsize::new(0));
         let mut n_finished = Arc::new(AtomicUsize::new(0));
 
-        if ! self.mark_stack.is_empty() {
-            let l = self.mark_stack.len();
-            mark_stack_sum.fetch_add(l, Ordering::Relaxed);
-            mark_stack_num.fetch_add(1, Ordering::Relaxed);
-            mark_stack_max.store(cmp::max(mark_stack_max.load(Ordering::SeqCst), l), Ordering::SeqCst);
-            mark_stack_min.store(cmp::min(mark_stack_min.load(Ordering::SeqCst), l), Ordering::SeqCst);
-        }
         // the outer loop is for the cases where the stack becomes
         // empty while we are synchronizing
         while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
@@ -1278,11 +1316,11 @@ impl Marking {
         let exn = tls.exception_in_transit.clone();
         let ta = tls.task_arg_in_transit.clone();
 
-        self.push_root_if_not_null(m, 0);
-        self.push_root_if_not_null(ct, 0);
-        self.push_root_if_not_null(rt, 0);
-        self.push_root_if_not_null(exn, 0);
-        self.push_root_if_not_null(ta, 0);
+        self.push_root_if_not_null(m, MAX_MARK_DEPTH);
+        self.push_root_if_not_null(ct, MAX_MARK_DEPTH);
+        self.push_root_if_not_null(rt, MAX_MARK_DEPTH);
+        self.push_root_if_not_null(exn, MAX_MARK_DEPTH);
+        self.push_root_if_not_null(ta, MAX_MARK_DEPTH);
     }
 
     fn mark_module(&self, m: &mut JlModule, d: i32, bits: u8) -> i32 {
@@ -1689,6 +1727,7 @@ impl<'a> Gc2<'a> {
         let t0 = neptune_hrtime();
         let last_perm_scanned_bytes = unsafe { perm_scanned_bytes } as i64;
 
+        assert!(unsafe { mark_caches.as_ref().unwrap().len() } <= unsafe { np_threads.as_ref().unwrap().thread_count() as usize });
         if cfg!(feature = "run_only_once") {
             if GC_ALREADY_RUN.swap(true, Ordering::SeqCst) {
                 return false;

@@ -10,38 +10,34 @@ use libc;
 /// The internal structure is represented as a Treiber stack.
 pub struct ConcurrentStack<T> {
     stack: TreiberStack<T>,
-    len: AtomicUsize,
 }
 
 impl<T> ConcurrentStack<T> {
     pub fn new() -> Self {
         ConcurrentStack {
             stack: TreiberStack::new(),
-            len: AtomicUsize::new(0),
         }
     }
 
+    #[inline(always)]
     pub fn push(&self, value: T) {
         self.stack.push(value);
     }
 
+    #[inline(always)]
     pub fn pop(&self) -> Option<T> {
         self.stack.try_pop()
     }
 
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.stack.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.len.load(Ordering::SeqCst)
     }
 
     /// This is thread-unsafe so other threads are prevented accessing the
     /// stack during clear, which is guaranteed by `&mut self`.
     #[inline(always)]
     pub fn clear(&mut self) {
-        self.len.store(0, Ordering::SeqCst);
         self.stack = TreiberStack::new();
     }
 }
