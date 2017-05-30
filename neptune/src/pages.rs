@@ -9,6 +9,8 @@ use std::mem;
 use std::cmp;
 use util::*;
 use core;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // max. page count per region.
 // From: https://doc.rust-lang.org/reference.html#conditional-compilation
@@ -53,7 +55,7 @@ impl Clone for Page {
 
 pub struct PageMgr {
     region_pg_count: usize,
-    pub current_pg_count: usize,
+    pub current_pg_count: Arc<AtomicUsize>,
 }
 impl PageMgr {
     pub fn new() -> PageMgr {
@@ -82,7 +84,7 @@ impl PageMgr {
         }
         PageMgr {
             region_pg_count: region_pg_count,
-            current_pg_count: 0,
+            current_pg_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -229,10 +231,10 @@ impl PageMgr {
             let j = ((! region.allocmap[i as usize]).ffs() - 1) as u32;
             region.allocmap[i as usize] |= 1 << j;
             // TODO: commit page (&region.pages[i * 32 + j])
-            self.current_pg_count += 1;
+            self.current_pg_count.fetch_add(1, Ordering::SeqCst);
             // notify Julia's GC debugger
             unsafe {
-                gc_final_count_page(self.current_pg_count);
+                gc_final_count_page(self.current_pg_count.load(Ordering::SeqCst));
             }
             &mut region.pages[(i * 32 + j) as usize]
         } else {
@@ -264,6 +266,7 @@ impl PageMgr {
 
     // free page with given index at given region
     pub fn free_page_in_region(&mut self, region: &mut Region, pg_idx: usize) {
+        // TODO make thread-safe so we can remove lock on pg_mgr()
         let bit_idx = (pg_idx % 32) as u8;
         assert!(region.allocmap[pg_idx / 32].get_bit(bit_idx), "GC: Memory corruption: allocation map and data mismatch!");
         region.allocmap[pg_idx / 32].set_bit(bit_idx, false);
@@ -306,7 +309,7 @@ impl PageMgr {
             region.lb = (pg_idx / 32) as u32;
         }
 
-        self.current_pg_count -= 1;
+        self.current_pg_count.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// port of `page_metadata` in Julia
@@ -347,7 +350,7 @@ mod pages_tests {
         let pgmgr = PageMgr::new();
         assert!(pgmgr.region_pg_count >= MIN_REGION_PG_COUNT);
         assert!(pgmgr.region_pg_count <= DEFAULT_REGION_PG_COUNT);
-        assert_eq!(pgmgr.current_pg_count, 0);
+        assert_eq!(pgmgr.current_pg_count.load(Ordering::SeqCst), 0);
     }
 
     #[test]

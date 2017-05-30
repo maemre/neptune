@@ -1972,7 +1972,7 @@ impl<'a> Gc2<'a> {
         self.clear_freelists();
         // TODO: get this from page manager
         let regions = unsafe { REGIONS.as_mut().unwrap() };
-        let remaining_pages = Arc::new(AtomicUsize::new(pg_mgr().current_pg_count)); // Arc+AtomicUsize in preparation for sharing among threads
+        let remaining_pages = Arc::new(AtomicUsize::new(pg_mgr().current_pg_count.load(Ordering::SeqCst))); // Arc+AtomicUsize in preparation for sharing among threads
         for ri in 0..regions.len() {
 
             let ref mut region = regions[ri];
