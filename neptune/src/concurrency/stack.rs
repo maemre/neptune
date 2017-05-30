@@ -1,53 +1,48 @@
-use std::sync::*;
-use std::slice;
+use std::sync::atomic::*;
+use crossbeam::sync::*;
 use libc;
 
 /// Concurrent, thread-safe stack implementation.  All accesses to
 /// this data structure are blocking.  This data structure overrides
 /// some of Rust's safety guarantees for sending raw pointers. Use it
 /// at your own risk with raw pointers.
+///
+/// The internal structure is represented as a Treiber stack.
 pub struct ConcurrentStack<T> {
-    vec: Arc<Mutex<Vec<T>>>,
+    stack: TreiberStack<T>,
+    len: AtomicUsize,
 }
 
 impl<T> ConcurrentStack<T> {
     pub fn new() -> Self {
         ConcurrentStack {
-            vec: Arc::new(Mutex::new(Vec::new())),
+            stack: TreiberStack::new(),
+            len: AtomicUsize::new(0),
         }
     }
 
     pub fn push(&self, value: T) {
-        self.vec.lock().unwrap().push(value);
+        self.stack.push(value);
     }
 
     pub fn pop(&self) -> Option<T> {
-        self.vec.lock().unwrap().pop()
+        self.stack.try_pop()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.vec.lock().unwrap().is_empty()
+        self.stack.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.vec.lock().unwrap().len()
+        self.len.load(Ordering::SeqCst)
     }
 
-    pub fn truncate(&self, size: usize) {
-        self.vec.lock().unwrap().truncate(size);
-    }
-/*
-    pub fn iter_mut(&mut self) -> slice::IterMut<T> {
-        self.vec.lock().unwrap().iter_mut()
-    }
-
-    pub fn iter(&self) -> slice::Iter<T> {
-        self.vec.lock().unwrap().iter()
-    }
-*/
+    /// This is thread-unsafe so other threads are prevented accessing the
+    /// stack during clear, which is guaranteed by `&mut self`.
     #[inline(always)]
-    pub fn clear(&self) {
-        self.truncate(0);
+    pub fn clear(&mut self) {
+        self.len.store(0, Ordering::SeqCst);
+        self.stack = TreiberStack::new();
     }
 }
 
