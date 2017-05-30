@@ -19,6 +19,8 @@ use crossbeam::sync::*;
 use std::thread;
 use std::collections::HashMap;
 
+type BitVec = Vec<AtomicBool>;
+
 const PARALLEL_SWEEP: bool = false;
 
 const PURGE_FREED_MEMORY: bool = false;
@@ -443,8 +445,8 @@ impl<'a> JlValueMarker for JlBinding<'a> {
 pub struct PageMeta<'a> {
     pub pool_n:     u8,   // idx of pool that owns this page
     // TODO: make following bools after transitioning to Rust
-    pub has_marked: u8,   // whether any cell is marked in this page
-    pub has_young:  u8,   // whether any live and young cells are in this page, before sweeping
+    pub has_marked: AtomicBool,   // whether any cell is marked in this page
+    pub has_young:  AtomicBool,   // whether any live and young cells are in this page, before sweeping
     pub nold:       AtomicU16,  // #old objects
     pub prev_nold:  u16,  // #old object during previous sweep
     pub nfree:      u16,  // #free objects, invalid if pool that owns this page is allocating from it
@@ -453,15 +455,15 @@ pub struct PageMeta<'a> {
     pub fl_end_offset:   u16, // offset of the last free object
     pub thread_n: u16, // thread id of the heap that owns this page
     pub data: Option<&'a mut [u8]>, // we are currently not using this, try removing it and see what breaks!
-    pub ages: Option<Box<Vec<AtomicU8>>>,
+    pub ages: Option<Box<BitVec>>,
 }
 
 impl<'a> PageMeta<'a> {
     pub fn new() -> Self {
         PageMeta {
             pool_n:     0,
-            has_marked: 0,
-            has_young:  0,
+            has_marked: AtomicBool::new(false),
+            has_young:  AtomicBool::new(false),
             nold:       AtomicU16::new(0),
             prev_nold:  0,
             nfree:      0,
@@ -482,22 +484,30 @@ impl<'a> PageMeta<'a> {
         // make sure that we have enough offset to fit a pointer, this can be
         // used for newpages optimization
         debug_assert!(GC_PAGE_OFFSET >= mem::size_of::<* mut libc::c_void>());
-        let n_ages = PAGE_SZ / 8 / self.osize as usize + 1;
+        let n_ages = PAGE_SZ / self.osize as usize;
         let mut ages = match self.ages.take() {
-            None => Box::new(Vec::with_capacity(n_ages)),
+            None => {
+                let bv = Box::new(BitVec::with_capacity(n_ages));
+
+                bv
+            }
             Some(mut ages) => {
+                ages.clear();
                 let capacity = ages.capacity();
 
                 if capacity < n_ages {
                     ages.reserve_exact(n_ages - capacity);
                 }
-
-                ages.clear();
                 ages
             }
         };
-        for i in 0..n_ages - 1 {
-            (*ages).push(AtomicU8::new(0));
+
+        for age in ages.iter_mut() {
+            *age.get_mut() = false;
+        }
+
+        for _ in ages.len()..n_ages {
+            ages.push(AtomicBool::new(false));
         }
 
         ages.shrink_to_fit(); // TODO: if this becomes a performance hog, we can drop it
@@ -630,7 +640,7 @@ impl MarkCache {
 
     // update metadata of the page the *marked* pool-allocated object lies in
     fn setmark_pool_(&mut self, o: * mut JlTaggedValue, mark_mode: u8, meta: &mut PageMeta) {
-        if cfg!(memdebug) {
+        if cfg!(feature="memdebug") {
             return self.setmark_big(o, mark_mode);
         }
 
@@ -641,18 +651,22 @@ impl MarkCache {
             self.scanned_bytes += meta.osize as usize;
 
             if get_mark_reset_age() != 0 {
-                meta.has_young = 1;
+                meta.has_young.store(true, Ordering::Relaxed);
                 unsafe {
                     let page_begin = Page::of_raw(o).offset(GC_PAGE_OFFSET as isize);
                     let obj_id = page_begin.offset_to(mem::transmute::<* mut JlTaggedValue, * const u8>(o)).unwrap() as usize / meta.osize as usize;
                     // set age of the object in memory pool atomically
-                    meta.ages.as_mut().unwrap()[obj_id / 8].fetch_and(!(1 << (obj_id % 8)), Ordering::Relaxed);
+                    meta.ages.as_mut().unwrap()[obj_id / 8].fetch_and(true, Ordering::Relaxed);
                 }
             }
         }
     }
 
     unsafe fn setmark_pool(&mut self, o: * mut JlTaggedValue, mark_mode: u8) {
+        if cfg!(feature="memdebug") {
+            return self.setmark_big(o, mark_mode);
+        }
+
         let meta = pg_mgr().find_pagemeta(o).unwrap();
         self.setmark_pool_(o, mark_mode, meta);
     }
@@ -930,7 +944,7 @@ impl Marking {
             if unsafe { intrinsics::likely(Marking::setmark_tag(o, GC_MARKED, tag, &mut bits)) } {
                 let tag = tag & !0xf;
                 if ! get_gc_verifying() {
-                    self.mark_obj(e, tag, bits);
+                    // self.mark_obj(e, tag, bits);
                 }
                 self.scan_obj(&e, d, tag, bits);
             }
@@ -1522,7 +1536,7 @@ impl<'a> Gc2<'a> {
 
         debug_assert_eq!(self.tls.gc_state, GcState::GcNotRunning); // make sure that GC is not working.
 
-        if cfg!(memdebug) {
+        if cfg!(feature="memdebug") {
             return self.big_alloc(size);
         }
 
@@ -1562,7 +1576,7 @@ impl<'a> Gc2<'a> {
                     };
                     // just a sanity check:
                     debug_assert_eq!(meta.osize as usize, pool.osize);
-                    meta.has_young = 1; // TODO: make this field a bool
+                    *meta.has_young.get_mut() = true;
                     meta.nfree -= 1;
                     /*
                     if let Some(next) = pool.freelist.last() {
@@ -1583,7 +1597,7 @@ impl<'a> Gc2<'a> {
                     };
                     // just a sanity check:
                     debug_assert_eq!(meta.osize as usize, pool.osize);
-                    meta.has_young = 1; // TODO: make this field a bool
+                    *meta.has_young.get_mut() = true;
                     meta.nfree -= 1;
                     v
                 }
@@ -1678,7 +1692,7 @@ impl<'a> Gc2<'a> {
             gc_num.bigalloc += 1;
         }
 
-        if cfg!(memdebug) {
+        if cfg!(feature="memdebug") {
             // TODO: fill bigval with 0xEE
         }
 
@@ -1728,6 +1742,8 @@ impl<'a> Gc2<'a> {
     pub fn collect(&mut self, full: bool) -> bool {
         let t0 = neptune_hrtime();
         let last_perm_scanned_bytes = unsafe { perm_scanned_bytes } as i64;
+
+        Gc2::verify_remsets();
 
         assert!(unsafe { mark_caches.as_ref().unwrap().len() } <= unsafe { np_threads.as_ref().unwrap().thread_count() as usize });
         if cfg!(feature = "run_only_once") {
@@ -2161,8 +2177,7 @@ impl<'a> Gc2<'a> {
             // if current page is to be swept
             // a page is to be swept if it contains young objects or we are
             // doing a full sweep
-            // TODO: change has_young to bool
-            if full || region.meta[pg_idx].has_young != 0 {
+            if full || *region.meta[pg_idx].has_young.get_mut() {
                 let meta = &mut region.meta[pg_idx];
                 let size = mem::size_of::<JlTaggedValue>() + meta.osize as usize;
                 let aligned_pg_size = PAGE_SZ - GC_PAGE_OFFSET;
@@ -2170,6 +2185,8 @@ impl<'a> Gc2<'a> {
                 let n_obj = aligned_pg_size / (size + padding) as usize;
                 let page = &mut region.pages[pg_idx];
                 let mut nfree = 0;
+                let mut has_young = false;
+
                 for o_idx in 0..n_obj {
                     let o = unsafe {
                         mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
@@ -2180,6 +2197,10 @@ impl<'a> Gc2<'a> {
                 }
 
                 bytes_freed += (nfree - meta.nfree as usize) * meta.osize as usize;
+
+                // reset #free objects
+                meta.nfree = nfree as u16;
+                *meta.nold.get_mut() = 0; // ???
 
                 if nfree != n_obj {
                     // there are live objects in the page, return free objects to the corresponding free list
@@ -2192,28 +2213,39 @@ impl<'a> Gc2<'a> {
                             mem::transmute::<&mut u8, &mut JlTaggedValue>(&mut page.data[o_idx * (size + padding) + GC_PAGE_OFFSET])
                         };
 
-                        if o.marked() {
-                            // clear marks during sweep
-                            o.set_marked(false);
-
-                            if full || ! o.old() {
-                                // it is a young object survived till next full sweep, promote it
-                                o.set_old(true);
+                        let mut bits = o.tag();
+                        if bits.marked() {
+                            if *meta.ages.as_mut().unwrap()[o_idx].get_mut() || bits == GC_OLD_MARKED {
+                                // object is old enough
+                                if full || bits == GC_MARKED {
+                                    bits = GC_OLD; // promote
+                                }
+                                meta.prev_nold += 1;
+                            } else {
+                                assert_eq!(bits, GC_MARKED, "meta.ages doesn't match the object's age");
+                                bits = GC_CLEAN;
+                                has_young = true;
                             }
-                            // TODO: better promotion, similar to original one in Julia
+                            // increment age, saturating
+                            *meta.ages.as_mut().unwrap()[o_idx].get_mut() = true;
+
+                            o.set_tag(bits);
                         } else {
                             freelist.push(o);
                         }
                     }
-
-                    // reset #free objects
-                    meta.nfree = nfree as u16;
+                    meta.has_marked.store(true, Ordering::Relaxed);
                 } else {
                     // page doesn't have anything alive in it, mark it for freeing
                     // TODO: do lazy sweeping with resets etc.
                     should_free = true;
+                    meta.has_marked.store(false, Ordering::Relaxed);
                 }
+
+
+                *meta.has_young.get_mut() = has_young;
             }
+
             // we free the page here to make borrow checker happy
             if should_free {
                 // page is unused, free it. we are being a little bit more aggressive here
