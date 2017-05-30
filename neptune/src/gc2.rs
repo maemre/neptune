@@ -1747,6 +1747,10 @@ impl<'a> Gc2<'a> {
 
         // make a collection/sweep decision based on statistics
 
+        unsafe {
+            gc_num.total_allocd += gc_num.since_sweep;
+        }
+
         // we want to free ~70% if possible.
         let not_freed_enough = estimate_freed < 7 * (actual_allocd/10);
         let mut nptr = 0;
