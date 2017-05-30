@@ -841,6 +841,7 @@ impl Marking {
         self.visit_mark_stack(); // this function processes all the pushed roots
     }
 
+    #[inline(never)]
     pub fn mark_finalizers(&self, orig_marked_len: usize) {
         // mark remaining finalizers
         for t in unsafe { get_all_tls() } {
@@ -1469,7 +1470,8 @@ impl<'a> Gc2<'a> {
             self.big_alloc(allocsz)
         };
         unsafe {
-            np_jl_set_typeof(v, typ);
+            // Set type of v. we are the only owner so this is OK here.
+            (*as_mut_jltaggedvalue(v)).yolo_set_header(typ as usize);
         }
         v
     }
@@ -1494,6 +1496,10 @@ impl<'a> Gc2<'a> {
                 unsafe {
                     jl_gc_collect(0);
                 }
+            }
+        } else {
+            unsafe {
+                np_jl_gc_safepoint_(self.tls);
             }
         }
 
@@ -1605,7 +1611,7 @@ impl<'a> Gc2<'a> {
     ///
     /// Note: Size includes the tag a nd the tag is not cleared!
     pub fn big_alloc(&mut self, size: usize) -> &mut JlValue {
-        // TODO: maybe_collect
+        self.maybe_collect();
         let rawsz = mem::size_of::<BigVal>().checked_add(size)
             .expect(& format!("Cannot allocate a BigVal with size {} on this architecture", size));
         // align size to cache byte alignment
@@ -1660,6 +1666,23 @@ impl<'a> Gc2<'a> {
         // N.B. This is *NOT* a GC safepoint due to heap mutation!!!
         debug_assert_eq!(unsafe { (*a).flags.how() }, AllocStyle::MallocBuffer);
         self.heap.mallocarrays.push(MallocArray::new(a));
+    }
+
+    #[inline(always)]
+    pub fn maybe_collect(&mut self) -> bool {
+        if unsafe { intrinsics::unlikely(unsafe { *gc_num.allocd.get_mut() } > 0) || debug_check_pool() } {
+            if ! (cfg!(feature="run_only_once") && GC_ALREADY_RUN.load(Ordering::SeqCst)) {
+                // println!("triggering periodic collection");
+                unsafe {
+                    jl_gc_collect(0);
+                }
+                return true;
+            }
+        }
+        unsafe {
+            np_jl_gc_safepoint_(self.tls);
+        }
+        false
     }
 
     pub fn collect(&mut self, full: bool) -> bool {
@@ -1903,12 +1926,13 @@ impl<'a> Gc2<'a> {
         self.heap.remset_nptr = 0;
     }
 
-    /// Mark given object concurrent to program execution. This is confusingly called `jl_gc_setmark` in Julia
+    /// Mark given object concurrent to program execution. This is confusingly called `jl_gc_setmark` in Julia.
+    /// This function _should not_ be called from inside GC.
     pub fn mark_concurrently(&mut self, v: * mut JlValue) {
         let o = unsafe {
             &mut *as_mut_jltaggedvalue(v)
         };
-        let tag = o.yolo_unsafe_header();
+        let tag = unsafe { o.yolo_header() };
 
         if ! tag.marked() {
             let mut bits: u8 = 0;
@@ -2161,7 +2185,7 @@ impl<'a> Gc2<'a> {
 
     // sweep bigvals in all threads
     fn sweep_bigvals(&mut self, full: bool) {
-
+        neptune_gc_time_big_start();
         for ptls in unsafe { get_all_tls() } {
             // get thread-local Gc
             let tl_gc = unsafe {
@@ -2185,6 +2209,7 @@ impl<'a> Gc2<'a> {
             // move all survivors from big_objects_marked to this thread's big_objects
             self.heap.big_objects.append(&mut *big_objects);
         }
+        neptune_gc_time_big_end();
     }
 
     // sweep bigvals local to this thread
@@ -2301,7 +2326,7 @@ impl<'a> Gc2<'a> {
                 end -= 1;
             }
 
-            neptune_gc_time_count_mallocd_array(tag.tag())
+            neptune_gc_time_count_mallocd_array(tag.tag() as libc::c_int)
         }
     }
 

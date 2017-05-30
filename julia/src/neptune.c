@@ -6,11 +6,6 @@
 #include "neptune.h"
 #include "gc.h"
 
-void np_jl_set_typeof(void *v, void *t)
-{
-  jl_set_typeof(v, t);
-}
-
 jl_value_t ** np_jl_svec_data(jl_value_t *v) {
   return jl_svec_data(v);
 }
@@ -49,4 +44,8 @@ void neptune_setmark_buf(tl_gcs_t *gc, void *buf, uint8_t mark_mode, size_t mins
 
 void gc_setmark_buf(jl_ptls_t ptls, void *buf, uint8_t mark_mode, size_t minsz) {
   neptune_setmark_buf(ptls->tl_gcs, buf, mark_mode, minsz);
+}
+
+void np_jl_gc_safepoint_(jl_ptls_t ptls) {
+  jl_gc_safepoint_(ptls);
 }

@@ -495,8 +495,12 @@ extern {
     pub fn gc_settime_postmark_end();
 
     pub fn gc_time_mallocd_array_start();
-    pub fn gc_time_count_mallocd_array(bits: u8);
+    pub fn gc_time_count_mallocd_array(bits: c_int);
     pub fn gc_time_mallocd_array_end();
+
+    pub fn gc_time_big_start();
+    pub fn gc_time_count_big(old_bits: c_int, bits: c_int);
+    pub fn gc_time_big_end();
 
     // mark boxed caches, which don't contain any pointers hence are terminal nodes
     pub fn jl_mark_box_caches(ptls: &mut JlTLS);
@@ -516,11 +520,11 @@ extern {
     pub fn gc_update_heap_size(sz_ub: i64, sz_est: i64);
 
     // set type of a value by setting the tag
-    pub fn np_jl_set_typeof(v: &mut JlValue, typ: * const c_void);
     pub fn np_jl_svec_data(v: * mut JlValue) -> * mut * mut JlValue;
     pub fn np_jl_field_isptr(st: * const JlDatatype, i: c_int) -> c_int;
     pub fn np_jl_field_offset(st: * const JlDatatype, i: c_int) -> u32;
     pub fn np_jl_symbol_name(sym: * const JlSym) -> * const c_char;
+    pub fn np_jl_gc_safepoint_(ptls: * mut JlTLS);
 
     pub fn np_corruption_fail(vt: * mut JlDatatype) -> !;
     pub fn np_verify_parent(ty: * const c_char, o: * const JlValue, slot: * const * mut JlValue, msg: * const c_char);
@@ -627,13 +631,46 @@ pub fn neptune_gc_time_mallocd_array_end() {
 
 #[inline(always)]
 #[cfg(feature = "gc_time")]
-pub fn neptune_gc_time_count_mallocd_array(bits: u8) {
+pub fn neptune_gc_time_big_start() {
+    unsafe { gc_time_big_start() }
+}
+
+#[inline(always)]
+#[cfg(not(feature = "gc_time"))]
+pub fn neptune_gc_time_big_start() {
+}
+
+#[inline(always)]
+#[cfg(feature = "gc_time")]
+pub fn neptune_gc_time_big_end() {
+    unsafe { gc_time_big_end() }
+}
+
+#[inline(always)]
+#[cfg(not(feature = "gc_time"))]
+pub fn neptune_gc_time_big_end() {
+}
+
+#[inline(always)]
+#[cfg(feature = "gc_time")]
+pub fn neptune_gc_time_count_big(old_bits: c_int, bits: c_int) {
+    unsafe { gc_time_count_big(old_bits, bits) }
+}
+
+#[inline(always)]
+#[cfg(not(feature = "gc_time"))]
+pub fn neptune_gc_time_count_big(old_bits: c_int, bits: c_int) {
+}
+
+#[inline(always)]
+#[cfg(feature = "gc_time")]
+pub fn neptune_gc_time_count_mallocd_array(bits: c_int) {
     unsafe { gc_time_count_mallocd_array(bits) }
 }
 
 #[inline(always)]
 #[cfg(not(feature = "gc_time"))]
-pub fn neptune_gc_time_count_mallocd_array(bits: u8) {
+pub fn neptune_gc_time_count_mallocd_array(bits: c_int) {
 }
 
 #[inline(always)]
