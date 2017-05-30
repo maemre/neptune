@@ -717,6 +717,7 @@ impl MarkCache {
         };
 
         unsafe {
+            hdr.in_list = false;
             hdr.slot = nobj;
         }
 
@@ -736,8 +737,9 @@ impl MarkCache {
             Gc2::unlink_big_object(hdr);
 
             if ((ptr as usize) & 1) != 0 {
+                // move to big_obj_list, a.k.a. "toyoung"
                 hdr.slot = self.big_obj_list.len();
-                hdr.tid = -1;
+                hdr.tid = -2; // normally, we must remember where this one went.
                 hdr.in_list = true;
                 self.big_obj_list.push(hdr);
             } else {
@@ -1778,22 +1780,9 @@ impl<'a> Gc2<'a> {
 
         Gc2::verify_to_finalize();
 
-        // flush everything in mark caches
-        for t in unsafe { get_all_tls() } {
-            let tl_gc = unsafe { &mut * t.tl_gcs };
-            // this is self, not tl_gc!
-            unsafe {
-                tl_gc.cache.sync_cache_nolock(&mut self.heap.big_objects, self.tid);
-            }
-        }
+        self.sync_caches();
 
-        for cache in unsafe { mark_caches.as_mut().unwrap().values_mut() } {
-            unsafe {
-                cache.sync_cache_nolock(&mut self.heap.big_objects, self.tid);
-            }
-            cache.sync_big_objects(self);
-            cache.sync_remset(self);
-        }
+        assert_eq!(unsafe { mark_caches.as_ref().unwrap().len() }, unsafe { np_threads.as_ref().unwrap().thread_count() as usize });
 
         let live_sz_ub: i64 = unsafe {
             live_bytes + actual_allocd
@@ -1876,6 +1865,27 @@ impl<'a> Gc2<'a> {
         recollect
     }
 
+    fn sync_cache(&mut self, cache: &mut MarkCache) {
+        unsafe {
+            cache.sync_cache_nolock(&mut self.heap.big_objects, self.tid);
+        }
+        cache.sync_big_objects(self);
+        cache.sync_remset(self);
+    }
+
+    #[inline(never)]
+    fn sync_caches(&mut self) {
+        // flush everything in mark caches
+        for t in unsafe { get_all_tls() } {
+            let tl_gc = unsafe { &mut * t.tl_gcs };
+            self.sync_cache(&mut tl_gc.cache);
+        }
+
+        for cache in unsafe { mark_caches.as_mut().unwrap().values_mut() } {
+            self.sync_cache(cache);
+        }
+    }
+
     fn unlink_big_object(b: &mut BigVal) {
         if ! b.in_list {
             return;
@@ -1884,7 +1894,8 @@ impl<'a> Gc2<'a> {
             // this part may cause deadlocks if this is called while holding lock of big_objects_marked
             unsafe {
                 let mut bo: MutexGuard<Vec<* mut BigVal>> = big_objects_marked.as_mut().unwrap().lock().unwrap();
-                bo.swap_remove(b.slot as usize);
+                let b2 = bo.swap_remove(b.slot as usize);
+                assert_eq!(b as * mut BigVal, b2);
                 b.in_list = false;
                 b.slot = 0;
             }
@@ -1897,7 +1908,8 @@ impl<'a> Gc2<'a> {
             let gc = unsafe {
                 &mut *get_all_tls()[b.tid as usize].tl_gcs
             };
-            gc.heap.big_objects.swap_remove(b.slot as usize);
+            let b2 = gc.heap.big_objects.swap_remove(b.slot as usize);
+            assert_eq!(b as * mut BigVal, b2 as * mut BigVal);
             b.slot = 0;
             b.in_list = false;
         };
@@ -2257,31 +2269,29 @@ impl<'a> Gc2<'a> {
     }
 
     fn sweep_big_list(list: &mut Vec<& mut BigVal>, full: bool) {
-        // TODO: report statistics
-
         let mut nbig_obj = list.len();
         let mut i = 0;
 
         while i < nbig_obj {
-            // lots of repetition to make borrow checker happy
-            if unsafe { list[i].taggedvalue().marked() } {
-                unsafe {
-                    list[i].mut_taggedvalue().set_marked(false);
-                }
+            let mut bits = list[i].taggedvalue().tag();
+            let old_bits: u8 = bits;
 
-                if list[i].age() > PROMOTE_AGE {
-                    unsafe {
-                        list[i].mut_taggedvalue().set_old(true);
+            if unsafe { bits.marked() } {
+                if list[i].age() > PROMOTE_AGE || bits == GC_OLD_MARKED {
+                    if full || bits == GC_MARKED {
+                        bits = GC_OLD;
                     }
+                } else {
+                    list[i].inc_age();
+                    bits = GC_CLEAN;
                 }
-                list[i].inc_age();
+                list[i].mut_taggedvalue().set_tag(bits);
                 i += 1;
             } else {
                 let b = list.swap_remove(i);
                 nbig_obj -= 1;
 
                 let begin = b.taggedvalue().get_value() as * const JlValue as usize;
-                // println!("reclaimed 0x{:x} to 0x{:x}", begin, begin + b.size() + BigVal::true_size());
 
                 unsafe {
                     gc_num.freed += b.allocd_size() as i64;
@@ -2291,6 +2301,8 @@ impl<'a> Gc2<'a> {
                     Gc2::rust_free(b as * mut BigVal, b.allocd_size());
                 }
             }
+
+            neptune_gc_time_count_big(old_bits as libc::c_int, bits as libc::c_int);
         }
     }
 
