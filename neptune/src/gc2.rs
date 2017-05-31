@@ -386,8 +386,7 @@ impl<'a> GcPool<'a> {
 
     #[inline(always)]
     pub fn clear_freelist(&mut self) {
-        // self.freelist.clear()
-        self.freelist = Vec::new()
+        self.freelist.clear()
     }
 }
 
@@ -1732,7 +1731,6 @@ impl<'a> Gc2<'a> {
 
         Gc2::verify_remsets();
 
-        assert!(unsafe { mark_caches.as_ref().unwrap().len() } <= unsafe { np_threads.as_ref().unwrap().thread_count() as usize });
         if cfg!(feature = "run_only_once") {
             if GC_ALREADY_RUN.swap(true, Ordering::SeqCst) {
                 return false;
@@ -1784,8 +1782,6 @@ impl<'a> Gc2<'a> {
         Gc2::verify_to_finalize();
 
         self.sync_caches();
-
-        assert_eq!(unsafe { mark_caches.as_ref().unwrap().len() }, unsafe { np_threads.as_ref().unwrap().thread_count() as usize });
 
         let live_sz_ub: i64 = unsafe {
             live_bytes + actual_allocd
