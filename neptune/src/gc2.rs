@@ -1228,10 +1228,6 @@ impl Marking {
             np_threads.as_mut().unwrap()
         };
 
-        let mut n_jobs = 0;
-        let mut n_started = Arc::new(AtomicUsize::new(0));
-        let mut n_finished = Arc::new(AtomicUsize::new(0));
-
         // the outer loop is for the cases where the stack becomes
         // empty while we are synchronizing
         while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
@@ -1240,24 +1236,15 @@ impl Marking {
             // automatically.
             thread_pool.scoped(|scope| {
                 while ! self.mark_stack.is_empty() && ! Gc2::should_timeout() {
-                    let n_started = n_started.clone();
-                    let n_finished = n_finished.clone();
                     // casting to let Rust send this pointer over threads
                     let v = self.mark_stack.pop().unwrap() as usize;
                     let header = unsafe { &*as_jltaggedvalue(v as * mut JlValue) }.read_header();
                     debug_assert_ne!(header, 0);
                     scope.execute(move || {
-                        n_started.fetch_add(1, Ordering::SeqCst);
                         self.scan_obj3(&(v as * mut JlValue), 0, header);
-                        n_finished.fetch_add(1, Ordering::SeqCst);
                     });
-
-                    n_jobs += 1;
                 }
             });
-
-            assert_eq!(n_started.load(Ordering::SeqCst), n_finished.load(Ordering::SeqCst));
-            assert_eq!(n_started.load(Ordering::SeqCst), n_jobs);
         }
 
         assert!(self.mark_stack.is_empty());
@@ -2309,7 +2296,7 @@ impl<'a> Gc2<'a> {
             let old_bits: u8 = bits;
 
             if unsafe { bits.marked() } {
-                if list[i].age() > PROMOTE_AGE || bits == GC_OLD_MARKED {
+                if list[i].age() >= PROMOTE_AGE || bits == GC_OLD_MARKED {
                     if full || bits == GC_MARKED {
                         bits = GC_OLD;
                     }
