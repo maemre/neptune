@@ -1,0 +1,7 @@
+[with 8 neptune threads]
+
+make -j 8 release (in neptune/julia/)
+neptune/tests/gc_bench/GCBench.jl
+neptune/tests/simple/run_all.jl
+julia/test/perf/{micro,kernel,cat,blas,simd,spell,sparse}/perf.jl
+julia/test/perf/shootout/perf.jl
