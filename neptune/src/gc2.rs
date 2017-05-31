@@ -2217,12 +2217,12 @@ impl<'a> Gc2<'a> {
                             freelist.push(o);
                         }
                     }
-                    meta.has_marked.store(true, Ordering::Relaxed);
+                    *meta.has_marked.get_mut() = true;
                 } else {
                     // page doesn't have anything alive in it, mark it for freeing
                     // TODO: do lazy sweeping with resets etc.
                     should_free = true;
-                    meta.has_marked.store(false, Ordering::Relaxed);
+                    *meta.has_marked.get_mut() = false;
                 }
 
 
