@@ -1,0 +1,23 @@
+\section{Introduction} \label{introduction}
+Dynamic languages like Python, Ruby, and Julia have become popular languages of choice for doing scientific research.
+Their ease of use and quick prototype-test development loop have attracted masses of scientists from fields outside of computer science alone.
+These languages have large collections of mathematics-, graphics-, and machine-learning-related libraries (e.g. doing quick computation on matrices, visualizing a data set, or performing NLP on a corpus of text), making adoption even more enticing.
+There biggest draw, however, could arguably be that they free the programmer from worrying about dynamic memory allocation and reclamation; they hide memory management from the user by wrapping allocation into the runtime system itself.
+
+This ease of use, however, has a cost; trivial memory management can often lead to unpredictable, unreliable, and unsatisfactory performance issues.
+For one, the user relinquishes almost all control to when, how often, and for how long garbage collection occurs.
+Garbage collection is the process of finding and reclaiming parts of memory that are no longer in use by a program.
+This essential system service often involves several phases of identifying, marking, and/or moving the contents of the heap around, and depending on the particular implementation, can cause intermittent, and possibly noticeable, pauses in program execution.
+
+In particular, Julia's garbage collector is stop-the-world, single-threaded, mark-and-sweep, and non-copying.
+Despite billing itself as high-performant, we posit that Julia's garbage collector is anything but, and we seek to create a garbage collector that is most importantly, highly-parallel.
+We use Rust, a systems programming language created in 2010, rewriting small portions of the Julia source to call into our Rust garbage collector for its allocation and cleanup routines.
+As a happy consequence of rewriting Julia's garbage collector in Rust, we gain the added assurance of type-safety, something the C language could hardly be argued to provide.
+
+We proceed as follows:
+\begin{itemize}
+  \item In section \ref{julia}, we discuss the Julia programming language, some example usage, and its design, particularly the design of the data structures and algorithms relating to its garbage collector.
+  \item In section \ref{neptune}, we discuss our approach to creating a parallel garbage collector. We briefly explain the Rust programming language and our rationale for using it as the implementation language. We discuss the structure of the new multithreaded garbage collector and detail some of the challenges encountered in the process.
+  \item In section \ref{evaluation}, we compare Julia's garbage collector to Neptune on a suite of benchmarks, offering several explanations for the results achieved.
+  \item In section \ref{conclusion}, we conclude our report and discuss possible further improvements.
+\end{itemize}
