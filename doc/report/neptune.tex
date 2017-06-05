@@ -1,1 +1,21 @@
 \section{Neptune} \label{neptune}
+
+Neptune is our parallel answer to the Julia's single-threaded garbage collector.
+We use a fixed number of threads for marking, while, for reasons to be explained shortly, a single thread for sweeping.
+Its structure is highly similar, overall, to Julia's, for several reasons.
+First, our goal was to test the effects of parallelism on garbage collection, not to experiment with novel approachs to the general garbage collection problem.
+Second, Julia's C implementation is highly complex, relying on delicate memory layout requirements, among other things.
+We did not want to make our job of understanding, tracking, marking, and sweeping the contents of memory as organized originally by Julia any harder by attempting optimizations on their algorithm, apart from the complexities of adding parallelism.
+
+\subsection{Why Rust}
+Rust is a modern systems programming language, created in 2010.
+It prides itself in providing many ``zero-cost'' abstractions, abstractions and guarantees that in other systems language normally require extensive library support or checks.
+It gives the user memory safety and automatic memory management \textbf{without} garbage collection due to its sophisticated type system, which incorporates ``affine'' types.
+All of this makes concurrency quick and easy in Rust, and also importantly, it proves a nice foreign function interface, which would be essential for interacting with Julia.
+
+\subsection{Design Decisions}
+Once our implementation of Julia's garbage collector was implemented in Rust (which took the bulk of our time), we had to decide where to proceed in achieving our goal of a parallel garbage collector.
+Our design decisions were primarily profile-guided, meaning we used the output of tools like Valgrind and OProfile, as well as in-code timers and measurements to determine where to prioritize parallelization implementation.
+We saw that while marking would benefit greatly from having multiple threads, parallel sweeping actual hindered performance.
+Since sweeping is mostly memory-bound, parallelizing it increased cache misses.
+We also took advantage of Rust's libaries in heavily using lock-free data structures and caches in many places to prevent unnecessary blocking and lock contention.
