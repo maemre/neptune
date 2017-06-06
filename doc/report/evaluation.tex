@@ -1,1 +1,48 @@
 \section{Evaluation} \label{evaluation}
+
+We evaluated Neptune against Julia on a computer with 16 GB RAM, and Intel Core i7-4790 CPU with 8 cores reported to the OS, frequency up to $3.60$~GHz and 32KB, 256KB, 8MB L1, L2, L3 caches respectively. The processor's hardware frequency governor was set to ``performance'' mode to disable power saving features. We also excercised the processor before measuring the results for each benchmark to simulate a long-running execution as the CPU frequency governor dials down the frequency when many cores are used for a long time to maintain the temperature. We used the following benchmarks for evaluation:
+
+\begin{description}
+\item[\texttt{coreimg}] Building Julia's core image and system image, i.e. compiling the standard library while using type inference engine \emph{written in Julia}.
+\item[\texttt{micro}] Microbenchmarks used for promoting Julia on its website.
+\item[\texttt{cat}] Matrix concatenation benchmark. Matrix concatenation is used a lot by programmers with MATLAB background.
+\item[\texttt{spell}] Peter Norvig's spellchecker. This benchmark is used in other garbage collection papers such as \cite{simon marlow's paper}.
+\item[\texttt{shallow}] A handwritten benchmark that creates lots of garbage in young generation.
+\item[\texttt{boehm}] Implementation of Hans Boehm's "An Artificial Garbage Collection Benchmark" in Julia.
+\end{description}
+
+The optimal speedup is observed with 5-6 worker threads (Figure~\ref{fig:speedup}), after that point threads start racing for cores fewer than the threads. As seen in the throughput and latency results (Figures~\ref{fig:throughput} and \ref{fig:latency}), our garbage collector has on average ~30\% worse single-threaded performance due to overhead of maintaining thread safety and due to some sweeping work Julia's GC offloads to allocation that we didn't offload to. Marlow et al. also report similar overhead for GHC's parallel garbage collector \ref{simon marlow's paper}.
+
+\begin{figure}[h]
+  \centering
+    \begin{subfigure}{0.25\textwidth}
+      \centering
+      % \vspace{-2em}
+      \includegraphics[height=5cm]{figures/speedup-julia.pdf}
+      \caption{Speedup over Julia, in terms of \% time spend during GC.}
+      \label{fig:speedup}
+    \end{subfigure}
+    \begin{subfigure}{0.32\textwidth}
+      \centering
+      % \vspace{-2em}
+      \includegraphics[height=5cm]{figures/throughput-normalized-julia.pdf}
+      
+      \caption{Normalized throughput with Julia = 1.}
+      \label{fig:throughput}
+    \end{subfigure}
+    \begin{subfigure}{0.32\textwidth}
+      \centering
+      % \vspace{-2em}
+      \includegraphics[height=5cm]{figures/max-latency.pdf}
+      %\todo{FIX neptune7 WITH neptune5}
+      \caption{Maximum GC latency (ms)}
+      \label{fig:latency}
+    \end{subfigure}
+    \caption{Experiment results}
+  \label{fig:results}
+\end{figure}
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: "report"
+%%% End:
