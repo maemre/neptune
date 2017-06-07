@@ -3,5 +3,5 @@ As dynamic languages become increasingly more popular, the need for quicker, saf
 Garbage collection in such systems involves reclaiming memory that is no longer needed by a program, and if done improperly, can cause undesirable degradation in program performance and throughputs and unacceptable increases in latency.
 Julia is a dynamically-typed, scientific programming language that aims to be highly performant, but unfortunately, its garbage collector is single-threaded and stop-the-world, causing it to miss out on possible speedups from the utilization of multicore processors.
 Our project, \textbf{Neptune}, is a multithreaded garbage collector for Julia, written in Rust, that aims to be safe and highly-parallel.
-Neptune achieves an average speedup of ???\%, a ???\% increase in throughput and ???\% decrease in latency, over Julia's garbage collector.
+Neptune achieves a $1.95\times$ average speedup, a $1.5\times$ increase in throughput, and a 27\% decrease in latency, over Julia's garbage collector.
 We show that exploiting the strengths of a modern, strongly- and statically-typed systems language allows us to create a performant parallel garbage collector for Julia.
