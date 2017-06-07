@@ -12,31 +12,31 @@ Marlow et al. also report similar overhead for GHC's parallel garbage collector 
 
 \begin{figure}[h]
   \centering
-    \begin{subfigure}{0.25\textwidth}
+    \begin{subfigure}{0.32\textwidth}
       \centering
       % \vspace{-2em}
-      \includegraphics[height=5cm]{figures/speedup-julia.pdf}
-      \caption{Speedup over Julia, in terms of \% time spend during GC.}
+      \includegraphics[height=4.8cm]{figures/speedup-julia.pdf}
+      \caption{Speedup over Julia}
       \label{fig:speedup}
     \end{subfigure}
     \begin{subfigure}{0.32\textwidth}
       \centering
       % \vspace{-2em}
-      \includegraphics[height=5cm]{figures/throughput-normalized-julia.pdf}
+      \includegraphics[height=4.8cm]{figures/throughput-normalized-julia.pdf}
       
-      \caption{Normalized throughput with Julia = 1.}
+      \caption{Normalized throughput}
       \label{fig:throughput}
     \end{subfigure}
     \begin{subfigure}{0.32\textwidth}
       \centering
       % \vspace{-2em}
-      \includegraphics[height=5cm]{figures/max-latency.pdf}
+      \includegraphics[height=4.8cm]{figures/max-latency.pdf}
       %\todo{FIX neptune7 WITH neptune5}
-      \caption{Maximum GC latency (ms)}
+      \caption{Maximum GC latency (ms)\\}
       \label{fig:latency}
     \end{subfigure}
-    \vspace{-1em}
-    \caption{Experiment results}
+    \vspace{-0.5em}
+    \caption{Experiment results. Figure~\ref{fig:speedup} shows speedup over Julia in terms of \% time taken in GC normalized with Julia = 1. Figure~\ref{fig:throughput} shows throughput normalized with Julia = 1.}
   \label{fig:results}
 \end{figure}
 
