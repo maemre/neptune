@@ -15,18 +15,27 @@ All of this makes concurrency quick and easy in Rust, and also importantly, it p
 
 \subsection{Design Decisions}
 Once our implementation of Julia's garbage collector was implemented in Rust (which took the bulk of our time), we had to decide where to proceed in achieving our goal of a parallel garbage collector.
-Our design decisions were primarily profile-guided, meaning we used the output of tools like Valgrind and OProfile, as well as in-code timers and measurements to determine where to prioritize parallelization implementation.
+Our general design was inspired by \cite{marlow2008parallel} and \cite{marlow2011multicore}, especially the parts about thread-local data structures and handling parallelism.
+Our specific design decisions were primarily profile-guided, meaning we used the output of tools like Valgrind and OProfile, as well as in-code timers and measurements to determine where to prioritize parallelization implementation.
 We saw that while marking would benefit greatly from having multiple threads, parallel sweeping actual hindered performance.
 Since sweeping is mostly memory-bound, parallelizing it increased cache misses.
 We also took advantage of Rust's libaries in heavily using lock-free data structures and caches in many places to prevent unnecessary blocking and lock contention.
 
-Neptune reads value of the environment variable \texttt{NEPTUNE\_THREADS} and creates a work-stealing thread pool. The parallel marking algorithm described in section~\ref{marking_algo} uses this thread pool rather than creating new threads every single time to avoid overhead of thread creation.
+Neptune reads value of the environment variable \texttt{NEPTUNE\_THREADS} and creates a work-stealing thread pool.
+The parallel marking algorithm described in section~\ref{marking_algo} uses this thread pool rather than creating new threads every single time to avoid overhead of thread creation.
 
 \subsection{The parallel marking algorithm}
 \label{marking_algo}
-We adapted Julia's marking algorithm to be multithreaded. The original marking algorithm is implemented as a recursive algorithm that walks the root set and pushes all the leaves to a stack (called the \emph{mark stack}) when it reaches a certain recursion depth. To parallelize this algorithm, we made a couple changes: Firstly, we changed the mark stack with a Treiber stack \cite{???} with epoch-based memory management which is a lock-free, thread-safe, and memory-safe stack implementation. Secondly, we changed all marking with atomic updates to be thread-safe. Finally, we implemented some thread-local caches that will get synchronized after marking to prevent having lots of expensive accesses to global data structures accompanied with locks. To do so, we extended Julia's mark caches and added one thread-local mark cache per garbage collection worker thread. Our thread-local mark caches contain local updates to: remsets, big object lists, and statistics for future collection decisions.
+We adapted Julia's marking algorithm to be multithreaded.
+The original marking algorithm is implemented as a recursive algorithm that walks the root set and pushes all the leaves to a stack (called the \emph{mark stack}) when it reaches a certain recursion depth.
+To parallelize this algorithm, we made a couple changes: Firstly, we changed the mark stack with a Treiber stack \cite{???} with epoch-based memory management which is a lock-free, thread-safe, and memory-safe stack implementation.
+Secondly, we changed all marking with atomic updates to be thread-safe.
+Finally, we implemented some thread-local caches that will get synchronized after marking to prevent having lots of expensive accesses to global data structures accompanied with locks.
+To do so, we extended Julia's mark caches and added one thread-local mark cache per garbage collection worker thread.
+Our thread-local mark caches contain local updates to: remsets, big object lists, and statistics for future collection decisions.
 
-Our marking algorithm gives marking jobs for all objects in the mark stack to the thread pool and waits for the worker threads to finish and synchronize. If the mark stack is not empty because worker threads added more objects in the meantime, the algorithm will do more iterations of the same job assignment until the mark stack is empty after synchronization.
+Our marking algorithm gives marking jobs for all objects in the mark stack to the thread pool and waits for the worker threads to finish and synchronize.
+If the mark stack is not empty because worker threads added more objects in the meantime, the algorithm will do more iterations of the same job assignment until the mark stack is empty after synchronization.
 
 %%% Local Variables:
 %%% mode: latex
