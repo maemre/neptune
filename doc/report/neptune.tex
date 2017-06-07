@@ -28,7 +28,8 @@ The parallel marking algorithm described in section~\ref{marking_algo} uses this
 \label{marking_algo}
 We adapted Julia's marking algorithm to be multithreaded.
 The original marking algorithm is implemented as a recursive algorithm that walks the root set and pushes all the leaves to a stack (called the \emph{mark stack}) when it reaches a certain recursion depth.
-To parallelize this algorithm, we made a couple changes: Firstly, we changed the mark stack with a Treiber stack \cite{???} with epoch-based memory management which is a lock-free, thread-safe, and memory-safe stack implementation.
+To parallelize this algorithm, we made a couple changes:
+Firstly, we changed the mark stack with a Treiber stack, a simple lock-free, thread-safe, and memory-safe stack algorithm.
 Secondly, we changed all marking with atomic updates to be thread-safe.
 Finally, we implemented some thread-local caches that will get synchronized after marking to prevent having lots of expensive accesses to global data structures accompanied with locks.
 To do so, we extended Julia's mark caches and added one thread-local mark cache per garbage collection worker thread.
