@@ -6,20 +6,32 @@ We also excercised the processor before measuring the results for each benchmark
 We used the following benchmarks for evaluation: Building Julia's core image and system image, i.e. compiling the standard library while using type inference engine \emph{written in Julia} (\texttt{coreimg}); Microbenchmarks used for promoting Julia on its website (\texttt{micro}); a matrix concatenation benchmark (\texttt{cat}) since matrix concatenation is used a lot by programmers with MATLAB background which constitute a considerable amount of Julia's user base; Peter Norvig's spellchecker (\texttt{spell}), this benchmark is used in other garbage collection papers such as \cite{marlow2008parallel}; a handwritten benchmark (\texttt{shallow}) that creates lots of garbage in young generation; implementation of Hans Boehm's "An Artificial Garbage Collection Benchmark" in Julia (\texttt{boehm}).
 
 The optimal speedup is observed with 5-6 worker threads (Figure~\ref{fig:speedup}), after that point threads start racing for cores fewer than the threads\footnote{There is 1 additional thread to coordinate the worker threads and the machine was running \texttt{X} and \texttt{ssh} during our benchmarks to simulate a realistic situation.}.
-\cite{marlow2011multicore} also observes a similar congestion behaviors.
-As seen in the throughput and latency results (Figures~\ref{fig:throughput} and \ref{fig:latency}), our garbage collector has on average ~30\% worse single-threaded performance due to overhead of maintaining thread safety and due to some sweeping work Julia's GC offloads to allocation that we didn't offload to.
-Marlow et al. also report similar overhead for GHC's parallel garbage collector \cite{marlow2008parallel}.
+\cite{marlow2011multicore} observes a similar dramatic congestion with more threads than available CPU cores.
+There are two reasons that we didn't achieve a unit increase per thread (e.g. 6 threads don't give $6\times$ performance increase):
+Firstly, our current load balancing algorithm is suboptimal since it measures work by the depth of traversal rather than the total number of pointers seen.
+We are playing with a variation that makes a stopping decision based on total number of pointers seen, our results so far weren't much better due to the extra arithmetic involved with counting all the pointes seen while processing a work unit.
+Secondly (and more importantly), we do not parallelize sweeping (which takes 40\% of the single-threaded time on average on these benchmarks) and got bitten by Amdahl's law.
+Although we implemented a parallelized sweeping algorithm to get a better result, we observed that sweep is mostly memory-bound and multithreaded sweep actually got worse performance due to threads fighting for memory bandwidth, dirtying cache (since all the pages are aligned to same boundary) and sheer amount of atomic operations.
+\cite{boehm1991mostly} suggests a lazy sweeping algorithm that skips allocated but unused pages and offloads adding such pages to freelists to memory allocation time.
+Julia implements such a lazy sweeping algorithm, which causes GC times measured for Julia to be underapproximations because some of the sweeping\footnote{We observed that Julia's GC skips $~70\%$ pages and offloads them to }.
+We did not implement that lazy algorithm due to lack of time available, we expect that implementing it would decrease sweeping time dramatically across the board and would result in a steeper speedup curve.
+
+As seen in the throughput results in Figure~\ref{fig:throughput}, our garbage collector has on average ~30\% worse single-threaded performance due to overhead of maintaining thread safety and lack of aforementioned optimization.
+Marlow et al. \cite{marlow2008parallel} also report similar overhead when parallelizing GHC's garbage collector, which is a mark-and-copy collector.
+
+Figure~\ref{fig:latency} shows that our parallel GC achieves a better maximum latency on most cases except for the cases when lots of young and unreachable objects are created (in which case the marking time is relatively small enough that coordinating the thread pool takes more time than marking itself).
+The main reason behind our lower single-threaded latency figure is the same as our single-threaded throughput results.
 
 \begin{figure}[h]
   \centering
-    \begin{subfigure}{0.32\textwidth}
+    \begin{subfigure}{0.28\textwidth}
       \centering
       % \vspace{-2em}
       \includegraphics[height=4.8cm]{figures/speedup-julia.pdf}
       \caption{Speedup over Julia}
       \label{fig:speedup}
     \end{subfigure}
-    \begin{subfigure}{0.32\textwidth}
+    \begin{subfigure}{0.34\textwidth}
       \centering
       % \vspace{-2em}
       \includegraphics[height=4.8cm]{figures/throughput-normalized-julia.pdf}
@@ -27,7 +39,7 @@ Marlow et al. also report similar overhead for GHC's parallel garbage collector 
       \caption{Normalized throughput}
       \label{fig:throughput}
     \end{subfigure}
-    \begin{subfigure}{0.32\textwidth}
+    \begin{subfigure}{0.34\textwidth}
       \centering
       % \vspace{-2em}
       \includegraphics[height=4.8cm]{figures/max-latency.pdf}
