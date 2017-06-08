@@ -8,7 +8,7 @@ We used the following benchmarks for evaluation: Building Julia's core image and
 The optimal speedup is observed with 5-6 worker threads (Figure~\ref{fig:speedup}), after that point threads start racing for cores fewer than the threads\footnote{There is 1 additional thread to coordinate the worker threads and the machine was running \texttt{X} and \texttt{ssh} during our benchmarks to simulate a realistic situation.}.
 \cite{marlow2011multicore} also observes a similar congestion behaviors.
 As seen in the throughput and latency results (Figures~\ref{fig:throughput} and \ref{fig:latency}), our garbage collector has on average ~30\% worse single-threaded performance due to overhead of maintaining thread safety and due to some sweeping work Julia's GC offloads to allocation that we didn't offload to.
-Marlow et al. also report similar overhead for GHC's parallel garbage collector \ref{marlow2008parallel}.
+Marlow et al. also report similar overhead for GHC's parallel garbage collector \cite{marlow2008parallel}.
 
 \begin{figure}[h]
   \centering
@@ -31,7 +31,6 @@ Marlow et al. also report similar overhead for GHC's parallel garbage collector 
       \centering
       % \vspace{-2em}
       \includegraphics[height=4.8cm]{figures/max-latency.pdf}
-      %\todo{FIX neptune7 WITH neptune5}
       \caption{Maximum GC latency (ms)\\}
       \label{fig:latency}
     \end{subfigure}

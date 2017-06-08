@@ -27,9 +27,25 @@ Each region tracks which chunks of pages are allocated via an allocation map, wh
 This way, Julia can track which pages have young data or marked objects, making checking during the sweep phase quick because only a single bit needs to be checked in order to skip a page.
 
 \subsection{GC Stages}
-Figure \ref{stages} shows the various stages of Julia's garbage collection.
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}{0.45\textwidth}
+    \includegraphics[width=\textwidth]{julia-gc.png}
+    \caption{Stages of Julia GC}
+    \label{fig:stages:jl}
+  \end{subfigure}
+  \begin{subfigure}{0.45\textwidth}
+    \includegraphics[width=\textwidth]{neptune-gc.png}
+    \caption{Stages of Neptune GC}
+    \label{fig:stages:np}
+  \end{subfigure}
+  \caption{Stages of Julia GC and Neptune}
+  \label{fig:stages}
+\end{figure}
+
+Figure \ref{fig:stages:jl} shows the various stages of Julia's garbage collection.
 Julia begins garbage collection choosing a thread to the collection.
-This thread acquires the global GC lock \todo(exact name) and begins doing some premarking work concurrently with other program threads, which soon learn that they must stop normal execution because garbage collection is going to begin.
+This thread acquires the global GC lock and begins doing some premarking work concurrently with other program threads, which soon learn that they must stop normal execution because garbage collection is going to begin.
 
 Once all the threads have suspended normal execution and reached a safe point, the GC begins the process of marking.
 Marking is the process of traversing the root set and all objects recursively reachable from said root set in order to mark all memory in use as actually in use.
@@ -52,10 +68,15 @@ Once flushed, the collector begins the sweep phase.
 Sweeping is the process of traversing all of memory and reclaiming the space previously used by unmarked (i.e. unreachable and therefore garbage) objects.
 Specifically, Julia's GC sweeps the finalizer list (at the same time scheduling objects for finalization), weak references, malloc'ed arrays, big objects, and each pool in each thread.
 
-Finally, the collector thread releases its hold of the global GC lock \todo (check this), calling the Julia finalizers.
+Finally, the collector thread releases its hold of the global GC lock, calling the Julia finalizers.
 Once completed, it causes all threads suspended at their safe points to resume normal execution.
 
 % TODO probably redo graphics to look better?
 %\includegraphics{regions}
 %\includegraphics{allocmap}
 %\includegraphics{stages}
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: "report"
+%%% End:

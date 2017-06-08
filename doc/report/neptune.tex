@@ -2,7 +2,7 @@
 
 Neptune is our parallel answer to the Julia's single-threaded garbage collector.
 We use a fixed number of threads for marking, while, for reasons to be explained shortly, a single thread for sweeping.
-Its structure is highly similar, overall, to Julia's, for several reasons.
+Its structure is highly similar, overall, to Julia's, for several reasons (as it can be seen in figure \ref{fig:stages:np}.
 First, our goal was to test the effects of parallelism on garbage collection, not to experiment with novel approachs to the general garbage collection problem.
 Second, Julia's C implementation is highly complex, relying on delicate memory layout requirements, among other things.
 We did not want to make our job of understanding, tracking, marking, and sweeping the contents of memory as organized originally by Julia any harder by attempting optimizations on their algorithm, apart from the complexities of adding parallelism.
