@@ -1,12 +1,11 @@
 \section{Introduction} \label{introduction}
 Dynamic languages like Python, Ruby, and Julia have become popular languages of choice for doing scientific research.
 Their ease of use and quick prototype-test development loop have attracted masses of scientists from fields outside of computer science alone.
-These languages have large collections of mathematics-, graphics-, and machine-learning-related libraries (e.g. doing quick computation on matrices, visualizing a data set, or performing NLP on a corpus of text), making adoption even more enticing.
-There biggest draw, however, could arguably be that they free the programmer from worrying about dynamic memory allocation and reclamation; they hide memory management from the user by wrapping allocation into the runtime system itself.
+These languages have large collections of mathematics-, graphics-, and machine-learning-related libraries (e.g. for doing quick computation on matrices, visualizing a data set, or performing NLP on a corpus of text), making adoption even more enticing.
+Their biggest advantage, however, could arguably be that they free the programmer from worrying about dynamic memory allocation and reclamation; they hide memory management from the user by wrapping allocation into the runtime system itself.
 
 This ease of use, however, has a cost; trivial memory management can often lead to unpredictable, unreliable, and unsatisfactory performance issues.
-For one, the user relinquishes almost all control to when, how often, and for how long garbage collection occurs.
-Garbage collection is the process of finding and reclaiming parts of memory that are no longer in use by a program.
+For one, the user relinquishes almost all control to when, how often, and for how long garbage collection (the process of finding and reclaiming unused memory) occurs.
 This essential system service often involves several phases of identifying, marking, and/or moving the contents of the heap around, and depending on the particular implementation, can cause intermittent, and possibly noticeable, pauses in program execution.
 
 In particular, Julia's garbage collector is stop-the-world, single-threaded, mark-and-sweep, and non-copying.

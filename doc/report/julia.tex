@@ -8,11 +8,10 @@ Although Julia itself can use multiple threads during normal execution, for garb
 It does some pre-mark work concurrently, but in general, it is stop-the-world, meaning it waits until all threads have reached a safe point to pause, then begins garbage collection on a single thread.
 It uses two generations for marking, ``young'' and ``old'', and has two type of collections, ``quick'' and ``full'', which involve collecting just the young generation or the entire mass of memory, respectively.
 
-Figure \ref{lifecycle} details an object's lifecycle.
 An new object begins life in the young generation, with its mark bit initially set to clean.
 During any garbage collection (quick or full), if it is marked and hasn't survived some arbitrary number of collections, it is returned to a clean state and persists for further use by the program.
 If it is marked and is old enough to be promoted, it is marked as old.
-During subsequent full collections, when this old object is marked, its mark bit gets changed once again to be identifiable as being both old and marked, and a writebarrier is setup so that it can remembered in the remembered set if it points to young objects.
+During subsequent full collections, when this old object is marked, its mark bit gets changed once again to be identifiable as being both old and marked, and a write barrier is set up so that it can remembered in the remembered set if it points to young objects.
 
 Each program thread maintains its own set of thread-local object pools, categorized by size, for allocating small objects.
 Big objects, however, are allocated with \texttt{malloc} and are consequently stored on global big object lists.
@@ -21,7 +20,6 @@ Because of the lack of bounds on heap size, garbage collection kicks in on dynam
 
 \subsection{Julia's Page Manager}
 Julia uses it own page manager for memory allocation.
-Figures \ref{regions} and \ref{allocmap} show a simplified model of the logical organization of memory according Julia's page manager.
 It allocates pages via the \texttt{mmap} system call, organizing these pages into 32-page chunks and likewise these chunks into N-chunk regions.
 Each region tracks which chunks of pages are allocated via an allocation map, which is an N-length array storing 32-bit bitmaps representing each page within a chunk.
 This way, Julia can track which pages have young data or marked objects, making checking during the sweep phase quick because only a single bit needs to be checked in order to skip a page.
