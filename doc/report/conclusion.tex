@@ -3,11 +3,11 @@
 We observed an up to $1.95\times$ increase in performance in terms of \% time spent in GC and on average $1.5\times$ throughput by implementing a parallel garbage collector.
 Using a language with static safety guarantees (Rust) helped implementing parallelization correctly by catching non-thread safe accesses in compile time.
 
-Although we didn't improve sweep time by parallelizing it due to sweep being memory-bound, Boehm\cite{boehm1991mostly} claims that sweep time is not that important and suggests an optimization that offloads sweeping emptied pages to allocations when new pages are needed.
-Julia already implements such an optimization.
-In the future, we can implement such an optimization to also decrease time spent during sweeping.
+In the future, implementing the lazy sweeping algorithm mentioned in Evaluation section would be a good direction to take (it is a rather low-hanging fruit that just requires some more time to implement, unfortunately we didn't have enough time to implement it before deadline).
 Another future improvement is designing a better load balancing method (like keeping a thread-local counter for work being done) to divide the work into more even chunks and to increase parallelization further.
 We are planning to try other thread-safe stack algorithms to implement the mark stack due to Treiber stack not scaling well under high loads.
+Having a more adaptive garbage collection algorithm that makes decisions about parallelization based on past data about live objects would be an interesting direction to follow.
+Such an algorithm can adaptively choose parallelization based on an estimation of the size of the object graph being walked, e.g. a simplistic approach would be parallelizing only when doing a full collection or keeping track of ratio of live data to allocated memory after each marking to make an estimation.
 
 %%% Local Variables:
 %%% mode: latex
