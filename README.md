@@ -8,7 +8,6 @@ A mostly concurrent garbage collector for Julia.
  + `neptune/`: Our garbage collector for Julia, written in Rust.
  + `doc/`: Design notes and documents for the project.
  + `benchmarks/`: GC benchmarks.
- + `report/`: Final report.
 
 ## Building the project
 
