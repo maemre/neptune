@@ -1,6 +1,6 @@
 \section{Introduction} \label{introduction}
 Dynamic languages like Python, Ruby, and Julia have become popular languages of choice for doing scientific research.
-Their ease of use and quick prototype-test development loop have attracted masses of scientists from fields outside of computer science alone.
+Their ease of use and quick prototype-test development loop have attracted masses of scientists from fields outside of computer science.
 These languages have large collections of mathematics-, graphics-, and machine-learning-related libraries (e.g. for doing quick computation on matrices, visualizing a data set, or performing NLP on a corpus of text), making adoption even more enticing.
 Their biggest advantage, however, could arguably be that they free the programmer from worrying about dynamic memory allocation and reclamation; they hide memory management from the user by wrapping allocation into the runtime system itself.
 
@@ -15,7 +15,7 @@ As a happy consequence of rewriting Julia's garbage collector in Rust, we gain t
 
 We proceed as follows:
 \begin{itemize}
-  \item In section \ref{julia}, we discuss the Julia programming language, some example usage, and its design, particularly the design of the data structures and algorithms relating to its garbage collector. \vspace{-0.6em}
+  \item In section \ref{julia}, we discuss the Julia programming language and its design, particularly the design of the data structures and algorithms relating to its garbage collector. \vspace{-0.6em}
   \item In section \ref{neptune}, we discuss our approach to creating a parallel garbage collector. We briefly explain the Rust programming language and our rationale for using it as the implementation language. We discuss the structure of the new multithreaded garbage collector and detail some of the challenges encountered in the process. \vspace{-0.6em}
   \item In section \ref{evaluation}, we compare Julia's garbage collector to Neptune on a suite of benchmarks, offering several explanations for the results achieved. \vspace{-0.6em}
   \item In section \ref{conclusion}, we conclude our report and discuss possible further improvements.

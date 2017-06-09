@@ -1,8 +1,8 @@
 \section{Neptune} \label{neptune}
 
-Neptune is our parallel answer to the Julia's single-threaded garbage collector.
-We use a fixed number of threads for marking, while, for reasons to be explained shortly, a single thread for sweeping.
-Its structure is highly similar, overall, to Julia's, for several reasons (as it can be seen in figure \ref{fig:stages:np}).
+Neptune is our parallel answer to Julia's single-threaded garbage collector.
+We use a fixed number of threads for marking and a single thread for sweeping, for reasons to be explained shortly. 
+Its overall structure is highly similar to Julia's for several reasons (as can be seen in figure \ref{fig:stages:np}).
 First, our goal was to test the effects of parallelism on garbage collection, not to experiment with novel approaches to the general garbage collection problem.
 Second, Julia's C implementation is highly complex, relying on delicate memory layout requirements, among other things.
 We did not want to make our job of understanding, tracking, marking, and sweeping the contents of memory as organized originally by Julia any harder by attempting optimizations on their algorithm, apart from the complexities of adding parallelism.
@@ -14,20 +14,20 @@ It gives the user memory safety and automatic memory management \textbf{without}
 All of this makes concurrency quick and easy in Rust, and also importantly, it provides a nice foreign function interface, which would prove essential for interacting with Julia.
 
 \subsection{Design Decisions}
-Once our implementation of Julia's garbage collector was implemented in Rust (which took the bulk of our time), we had to decide where to proceed in achieving our goal of a parallel garbage collector.
+Once we completed our implementation of Julia's garbage collector in Rust (which took the bulk of our time), we had to decide where to proceed in achieving our goal of a parallel garbage collector.
 Our general design was inspired by \cite{marlow2008parallel} and \cite{marlow2011multicore}, especially the parts about thread-local data structures and handling parallelism.
 Our specific design decisions were primarily profile-guided, meaning we used the output of tools like Valgrind and OProfile, as well as in-code timers and measurements, to determine where to prioritize parallelization implementation.
 We saw that while marking would benefit greatly from having multiple threads, parallel sweeping actual hindered performance.
 Since sweeping is mostly memory-bound, parallelizing it increased cache misses.
 We also took advantage of Rust's libaries in heavily using lock-free data structures and caches in many places to prevent unnecessary blocking and lock contention.
 
-Neptune reads value of the environment variable \texttt{NEPTUNE\_THREADS} and creates a work-stealing thread pool.
-The parallel marking algorithm described in section~\ref{marking_algo} uses this thread pool rather than creating new threads every single time to avoid overhead of thread creation.
+Neptune reads the value of the environment variable \texttt{NEPTUNE\_THREADS} and creates a work-stealing thread pool.
+The parallel marking algorithm described in section~\ref{marking_algo} uses this thread pool rather than creating new threads every single time to avoid the overhead of thread creation.
 
-\subsection{The parallel marking algorithm}
+\subsection{The Parallel Marking Algorithm}
 \label{marking_algo}
 We adapted Julia's marking algorithm to be multithreaded.
-The original marking algorithm is implemented as a recursive algorithm that walks the root set and pushes all the leaves to a stack (called the \emph{mark stack}) when it reaches a certain recursion depth.
+The original marking algorithm is implemented as a recursive algorithm that walks the root set and pushes all the leaves onto a stack (called the \emph{mark stack}) when it reaches a certain recursion depth.
 To parallelize this algorithm, we made a couple changes:
 Firstly, we replaced the original mark stack with a Treiber stack, a simple lock-free, thread-safe, and memory-safe stack algorithm.
 Secondly, we enhanced all marking with atomic updates to be thread-safe.
