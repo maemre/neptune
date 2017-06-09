@@ -3,7 +3,8 @@ Julia is a dynamic scientific programming language which aims for end-to-end thr
 It has function-level just-in-time compilation via LLVM, and uses stable, highly-performant numeric computation libraries written in FORTRAN.
 
 \subsection{Julia's Garbage Collector}
-Julia's garbage collector uses a mark-and-sweep algorithm.
+Julia's garbage collector uses a mark-and-sweep algorithm since it cannot move data which is pointed to native (non-Julia) code.
+This design decision was made because the language aims for a really fast foreign function interface to reuse numerical computation libraries written in other languages.
 Although Julia itself can use multiple threads during normal execution, for garbage collection, it is single-threaded.
 It does some pre-mark work concurrently, but in general, it is stop-the-world, meaning it waits until all threads have reached a safe point to pause, then begins garbage collection on a single thread.
 It uses two generations for marking, ``young'' and ``old'', and has two type of collections, ``quick'' and ``full'', which involve collecting just the young generation or the entire mass of memory, respectively.
@@ -20,7 +21,7 @@ Because of the lack of bounds on heap size, garbage collection kicks in on dynam
 
 \subsection{Julia's Page Manager}
 Julia uses it own page manager for memory allocation.
-It allocates pages via the \texttt{mmap} system call, organizing these pages into 32-page chunks and likewise these chunks into N-chunk regions.
+It allocates huge (8GB) memory regions via the \texttt{mmap} system call relying on overcommitting from the operating system, splits these regions into 32-page chunks and likewise these chunks into pages.
 Each region tracks which chunks of pages are allocated via an allocation map, which is an N-length array storing 32-bit bitmaps representing each page within a chunk.
 This way, Julia can track which pages have young data or marked objects, making checking during the sweep phase quick because only a single bit needs to be checked in order to skip a page.
 
@@ -51,7 +52,7 @@ Specifically, it first marks all pointer-free objects (the empty tuple type, \te
 Then it marks each thread's remembered set objects (i.e. all old objects that point to younger ones, which were remembered from the last garbage collection).
 Next it marks each thread's local roots (the thread's modules, tasks, etc.).
 It also marks the initial root set (built-in values, assorted constants, etc.) and objects referenced by objects on the finalizer lists.
-Finally, it marks objects put on the mark stack during the previous marking process just described, because of an imposed marking depth limit.
+Finally, it marks objects put on the mark stack during the previous marking process just described, because of a marking depth limit that is imposed to prevent stack overflows during recursive calls in marking algorithm.
 
 The process of marking an individual object is fairly straightforward.
 The collector first checks the current recursion depth, queuing the object if too high.
